@@ -1,35 +1,59 @@
-import { Controller, Get, Post, Put, Delete, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode } from '@nestjs/common';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsOptional } from 'class-validator';
 import { CustomerService } from './customer.service';
-
 import { CustomerCreateDto } from './dto/customer-create.dto';
 import { CustomerUpdateDto } from './dto/customer-update.dto';
-import { CustomerDto } from './dto/customer.dto';
+import { CustomerPaymentDto } from './dto/customer-payment.dto';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
+import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
+import { CurrentEnterprise } from '../common/decorators/current-enterprise.decorator';
+
+class CustomerListQueryDto extends PaginationQueryDto {
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  onlyWithDebt?: boolean;
+}
 
 @Controller('customer')
 export class CustomerController {
   constructor(private readonly customerService: CustomerService) {}
 
   @Post()
-  create(@Body() customer: CustomerCreateDto) {
-    return this.customerService.create(customer);
+  create(@CurrentEnterprise() eid: string, @Body() dto: CustomerCreateDto) {
+    return this.customerService.create(eid, dto);
+  }
+
+  @Get()
+  list(@CurrentEnterprise() eid: string, @Query() q: CustomerListQueryDto) {
+    return this.customerService.list(eid, q);
   }
 
   @Get(':id')
-  getCustomerById(@Param('id') id: string) {
-    return this.customerService.getCustomerById(id);
+  getById(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) {
+    return this.customerService.getCustomerById(eid, id);
   }
 
   @Put(':id')
-  update(@Param('id') id: string, @Body() customer: CustomerUpdateDto) {
-    return this.customerService.update(id, customer);
+  update(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: CustomerUpdateDto) {
+    return this.customerService.update(eid, id, dto);
   }
 
   @Delete(':id')
-  delete(@Param('id') id: string) {
-    return this.customerService.delete(id);
+  @HttpCode(204)
+  delete(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) {
+    return this.customerService.delete(eid, id);
   }
 
-  //TODO: adicionar métodos de aumento e diminuição de valor
+  /** Cliente pagou (parte do) fiado. */
+  @Post(':id/payments')
+  receivePayment(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: CustomerPaymentDto) {
+    return this.customerService.receivePayment(eid, id, dto);
+  }
 
-
+  @Get(':id/payments')
+  listPayments(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) {
+    return this.customerService.listPayments(eid, id);
+  }
 }

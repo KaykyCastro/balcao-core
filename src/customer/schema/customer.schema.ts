@@ -1,25 +1,29 @@
-import { Prop, Schema } from '@nestjs/mongoose';
-import { SchemaFactory } from '@nestjs/mongoose';
-import { Types } from 'mongoose';
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Schema as MongooseSchema, Types, HydratedDocument } from 'mongoose';
 
-@Schema({ timestamps: true })
+export type CustomerDocument = HydratedDocument<CustomerSchema>;
+
+@Schema({ timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } })
 export class CustomerSchema {
+  @Prop({ required: true, trim: true })
+  name: string;
 
-    @Prop({ required: true })
-    name: string;
+  @Prop({ default: '' })
+  address: string;
 
-    @Prop({ required: false, default: '' })
-    address: string;
+  @Prop({ default: '' })
+  numberWithPrefix: string;
 
-    @Prop({ required: false, default: '' })
-    numberWithPrefix: string;
+  /** Dívida de fiado em centavos (inteiro, sem erro de ponto flutuante). */
+  @Prop({ required: true, default: 0, min: 0 })
+  debitCents: number;
 
-    @Prop({ required: true, default: 0 })
-    debitValue: number;
-
-    @Prop({ type: Types.ObjectId, ref: 'Enterprise', required: true, index: true })
-    enterpriseId: Types.ObjectId;
-
-}   
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'EnterpriseSchema', required: true, index: true })
+  enterpriseId: Types.ObjectId;
+}
 
 export const CustomerSchemaFactory = SchemaFactory.createForClass(CustomerSchema);
+// Compatibilidade com o front: continua expondo `debitValue` em reais no JSON.
+CustomerSchemaFactory.virtual('debitValue').get(function (this: { debitCents?: number }) {
+  return (this.debitCents ?? 0) / 100;
+});

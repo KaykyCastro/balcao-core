@@ -1,14 +1,18 @@
 import { Prop, Schema } from '@nestjs/mongoose';
 import { Types } from 'mongoose';
+import { HydratedDocument } from 'mongoose';
+import { SchemaFactory } from '@nestjs/mongoose';
+
+export type DebitItemDocument = HydratedDocument<DebitItemSchema>;
 
 @Schema({ timestamps: true })
 export class DebitItemSchema {
 
-    @Prop({ type: Types.ObjectId , ref: 'Product', required: true, index: true })
-    productId: Types.ObjectId;
+    @Prop({required: true})
+    productName: string;
 
-    @Prop({ type: Types.ObjectId, ref: 'Debit', required: true, index: true })
-    debitId: Types.ObjectId;
+    @Prop({ required: true })
+    productCode: string;
 
     @Prop({ required: true, min: 0 })
     unitPrice: number;
@@ -18,5 +22,13 @@ export class DebitItemSchema {
 
     @Prop({ required: true, min: 0 })
     total: number;
+
+    @Prop({ type: Types.ObjectId , ref: 'Product', required: true, index: true })
+    productId: Types.ObjectId;
+
+    @Prop({ type: Types.ObjectId, ref: 'Debit', required: true, index: true })
+    debitId: Types.ObjectId;
     
 }
+
+export const DebitItemSchemaFactory = SchemaFactory.createForClass(DebitItemSchema);

@@ -1,14 +1,7 @@
-import { IsNotEmpty, IsString, IsMongoId } from 'class-validator';
-import { Types } from 'mongoose';
+import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
 export class CategoryCreateDto {
-
-    @IsNotEmpty()
-    @IsString()
-    name: string;
-
-    @IsNotEmpty()
-    @IsMongoId()
-    enterpriseId: Types.ObjectId;
-
+  @IsNotEmpty()
+  @IsString() @MaxLength(80)
+  name: string;
 }

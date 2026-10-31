@@ -1,18 +1,18 @@
-import { IsNotEmpty, IsNumber, IsOptional, IsString, IsMongoId } from 'class-validator';
+import { IsArray, ArrayNotEmpty, IsMongoId, ValidateNested } from 'class-validator';
+import { DebitItemInputDto } from './debit-item-input.dto';
+import { Type } from 'class-transformer';
 
 export class DebitCreateDto {
 
-    @IsNotEmpty()
-    @IsNumber()
-    total: number;
+  @IsMongoId()
+  enterpriseId: string;
 
-    @IsNotEmpty()
-    @IsMongoId()
-    customerId: string;
+  @IsMongoId()
+  customerId: string;
 
-    @IsNotEmpty()
-    @IsMongoId()
-    productsId: string[];
-    
-
+  @IsArray()
+  @ArrayNotEmpty()
+  @ValidateNested({ each: true })
+  @Type(() => DebitItemInputDto)
+  items: DebitItemInputDto[];
 }

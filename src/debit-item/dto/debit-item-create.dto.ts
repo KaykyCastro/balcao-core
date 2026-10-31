@@ -5,6 +5,14 @@ import { Types } from 'mongoose';
 export class DebitItemCreateDto {
 
     @IsNotEmpty()
+    @IsString()
+    productName: string;
+
+    @IsNotEmpty()
+    @IsString()
+    productCode: string;
+
+    @IsNotEmpty()
     @IsNumber()
     unitPrice: number;
 
@@ -13,11 +21,15 @@ export class DebitItemCreateDto {
     quantity: number;
 
     @IsNotEmpty()
-    @IsMongoId()
-    productId: string;
+    @IsNumber()
+    total: number;
 
     @IsNotEmpty()
     @IsMongoId()
-    debitId: string;
+    productId: Types.ObjectId;
+
+    @IsNotEmpty()
+    @IsMongoId()
+    debitId: Types.ObjectId;
 
 }

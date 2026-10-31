@@ -3,13 +3,21 @@ services:
     image: mongo:latest
     restart: always
     environment:
-     - MONGO_INITDB_ROOT_USERNAME=sally
-     - MONGO_INITDB_ROOT_PASSWORD=sally
-     - MONGO_INITDB_DATABASE=sally
+      MONGO_INITDB_ROOT_USERNAME: sally
+      MONGO_INITDB_ROOT_PASSWORD: sally
+      MONGO_INITDB_DATABASE: sally
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --keyFile
+      - /etc/mongo-keyfile
     ports:
-      - 27017:27017
+      - "27017:27017"
     volumes:
       - banco-data:/data/db
+      - ./mongo-keyfile:/etc/mongo-keyfile:ro
 
 volumes:
   banco-data:

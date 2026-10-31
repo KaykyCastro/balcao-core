@@ -1,7 +1,9 @@
 import { Prop, Schema } from '@nestjs/mongoose';
-import Types from 'mongoose';
+import {Types} from 'mongoose';
 import { SchemaFactory } from '@nestjs/mongoose';
+import { HydratedDocument } from 'mongoose';
 
+export type DebitDocument = HydratedDocument<DebitSchema>;
 
 @Schema({ timestamps: true })
 export class DebitSchema {

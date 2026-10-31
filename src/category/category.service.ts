@@ -1,55 +1,58 @@
-import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { CategorySchema } from './schema/category.schema';
-import { Model } from 'mongoose';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model } from 'mongoose';
 
-import { CategoryDto } from './dto/category.dto';
+import { CategorySchema, CategoryDocument } from './schema/category.schema';
 import { CategoryCreateDto } from './dto/category-create.dto';
 import { CategoryUpdateDto } from './dto/category-update.dto';
+import { isDuplicateKeyError } from '../common/mongo';
 
 @Injectable()
 export class CategoryService {
-    constructor(
-        @InjectModel(CategorySchema.name) private readonly categoryModel: Model<CategorySchema>,
-    ) {} 
+  constructor(
+    @InjectModel(CategorySchema.name) private readonly categoryModel: Model<CategorySchema>,
+    @InjectConnection() private readonly connection: Connection,
+  ) {}
 
-    async create(category: CategoryCreateDto) : Promise<CategoryDto | null> {
-        const categoryExist = await this.categoryModel.findOne({name: category.name});
-        if(categoryExist) {
-            throw new Error('Category already exists');
-        }
-
-        const newCategory = await this.categoryModel.create(category);
-
-        return newCategory;
+  async create(enterpriseId: string, dto: CategoryCreateDto): Promise<CategoryDocument> {
+    try {
+      return await this.categoryModel.create({ name: dto.name, enterpriseId });
+    } catch (e) {
+      if (isDuplicateKeyError(e)) throw new ConflictException('Categoria já existe');
+      throw e;
     }
+  }
 
-    async findCategoryById(id: string): Promise<CategoryDto | null> {
+  async list(enterpriseId: string): Promise<CategoryDocument[]> {
+    return this.categoryModel.find({ enterpriseId }).sort({ name: 1 });
+  }
 
-        const category = await this.categoryModel.findById(id);
-        if(!category) {
-            throw new Error('Category not found');
-        }
-        return category;
+  async findCategoryById(enterpriseId: string, id: string): Promise<CategoryDocument> {
+    const category = await this.categoryModel.findOne({ _id: id, enterpriseId });
+    if (!category) throw new NotFoundException('Categoria não encontrada');
+    return category;
+  }
+
+  async update(enterpriseId: string, id: string, dto: CategoryUpdateDto): Promise<CategoryDocument> {
+    try {
+      const updated = await this.categoryModel.findOneAndUpdate(
+        { _id: id, enterpriseId },
+        { $set: { name: dto.name } },
+        { returnDocument: 'after', runValidators: true },
+      );
+      if (!updated) throw new NotFoundException('Categoria não encontrada');
+      return updated;
+    } catch (e) {
+      if (isDuplicateKeyError(e)) throw new ConflictException('Categoria já existe');
+      throw e;
     }
+  }
 
-    async update(id: string, category: CategoryUpdateDto): Promise<CategoryDto | null> {
-        const categoryExist = await this.categoryModel.findOne({ name: category.name });
-        if(!categoryExist) {
-            throw new Error('Category not found');
-        }
-
-        const updatedCategory = await this.categoryModel.findByIdAndUpdate(id, category, { new: true });
-
-        return updatedCategory;
-    }
-
-    async delete(id: string): Promise<void> {
-        const category = await this.categoryModel.findByIdAndDelete(id);
-        if(!category) {
-            throw new Error('Category not found');
-        }
-    }
-
-
+  async delete(enterpriseId: string, id: string): Promise<void> {
+    // Consulta o model de produtos pela conexão (evita dependência circular entre módulos).
+    const inUse = await this.connection.model('ProductSchema').exists({ enterpriseId, categoryId: id });
+    if (inUse) throw new ConflictException('Existem produtos nesta categoria');
+    const category = await this.categoryModel.findOneAndDelete({ _id: id, enterpriseId });
+    if (!category) throw new NotFoundException('Categoria não encontrada');
+  }
 }

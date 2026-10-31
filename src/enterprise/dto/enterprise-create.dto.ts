@@ -1,28 +1,25 @@
-import { IsEmail, IsOptional, IsString, isNotEmpty, IsNotEmpty } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+
+/** Logo: data URL de imagem (PNG/JPEG/WebP) ou https. SVG fica de fora (pode carregar script). */
+export const LOGO_RE = /^(data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+|https:\/\/[^\s"'<>]+)$/;
+export const PASSWORD_MSG = 'A senha precisa ter de 8 a 72 caracteres';
 
 export class EnterpriseCreateDto {
+  @IsNotEmpty() @IsString() @MaxLength(120)
+  name: string;
 
-    @IsNotEmpty()
-    @IsString()
-    name: string;
-    
-    @IsNotEmpty()
-    @IsOptional()
-    logo: string;
+  @IsOptional() @IsString() @MaxLength(400_000) @Matches(LOGO_RE, { message: 'Logo inválida' })
+  logo?: string;
 
-    @IsNotEmpty()
-    @IsEmail()
-    email: string;
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
+  @IsEmail() @MaxLength(254)
+  email: string;
 
-    @IsNotEmpty()
-    @IsString()
-    password: string;
+  /** bcrypt só lê os 72 primeiros bytes; limitar evita senha "truncada" sem aviso e DoS por senha gigante. */
+  @IsString() @MinLength(8, { message: PASSWORD_MSG }) @MaxLength(72, { message: PASSWORD_MSG })
+  password: string;
 
-    @IsOptional()
-    @IsString()
-    cnpj: string;
-
-    @IsNotEmpty()
-    createdAt: Date;
-
+  @IsOptional() @IsString() @MaxLength(18)
+  cnpj?: string;
 }
