@@ -49,6 +49,10 @@ export class Promotion {
   @Prop({ type: Date, default: null })
   endsAt: Date | null;
 
+  /** Promoção com vários produtos: todos os itens do grupo têm o mesmo groupId (nome e período em comum). */
+  @Prop({ type: MongooseSchema.Types.ObjectId, default: null, index: true })
+  groupId: Types.ObjectId | null;
+
   /** Encerrada à mão. */
   @Prop({ type: Date, default: null })
   endedAt: Date | null;

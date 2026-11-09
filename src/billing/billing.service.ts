@@ -7,13 +7,15 @@ import { EnterpriseService } from '../enterprise/enterprise.service';
 import { FeeEntry } from './schema/fee-entry.schema';
 import { Invoice, InvoiceDocument } from './schema/invoice.schema';
 import { PaymentEvent } from './schema/payment-event.schema';
-import { InfinitePayClient } from './infinitepay.client';
+import { MercadoPagoClient } from '../mercadopago/mercadopago.client';
+import { sign, verifySigned } from '../common/secret-box';
 import { FEE_RATE_BPS, calcFeeCents, graceDays } from './billing.constants';
 import { SettingsService } from '../settings/settings.service';
-import { dueDateFrom, feeWaived, inTrial, trialDaysLeft, trialEnd } from './billing.rules';
+import { dueDateFrom, feeWaived, freeMonthProblem, inTrial, isFreeMonth, trialDaysLeft, trialEnd } from './billing.rules';
 import { nextMonthStart, periodOf } from '../common/period';
+import { crossTenant } from '../common/security/tenant-guard.plugin';
 
-export interface PaidInfo { via: 'infinitepay' | 'manual'; transactionNsu?: string; captureMethod?: string; paidAmountCents?: number; note?: string }
+export interface PaidInfo { via: 'mercadopago' | 'manual'; paymentId?: string; method?: string; paidAmountCents?: number; note?: string }
 
 @Injectable()
 export class BillingService {
@@ -25,7 +27,7 @@ export class BillingService {
     @InjectModel(PaymentEvent.name) private readonly eventModel: Model<PaymentEvent>,
     @InjectConnection() private readonly connection: Connection,
     private readonly enterpriseService: EnterpriseService,
-    private readonly pay: InfinitePayClient,
+    private readonly mp: MercadoPagoClient,
     private readonly config: ConfigService,
     private readonly settings: SettingsService,
   ) {}
@@ -54,6 +56,7 @@ export class BillingService {
     if (feeWaived(enterprise)) return 0;
 
     const period = periodOf();
+    if (isFreeMonth(enterprise, period)) return 0; // mês grátis dado pelo admin
     const soFar = await this.monthFeeCents(enterpriseId, period, session);
     const applied = Math.min(calcFeeCents(saleTotalCents), Math.max(0, (await this.capFor(enterprise)) - soFar));
     if (applied > 0) {
@@ -70,6 +73,21 @@ export class BillingService {
   async recordCollectedFee(enterpriseId: string, saleId: Types.ObjectId, baseCents: number, rateBps: number, feeCents: number, session: ClientSession): Promise<number> {
     if (feeCents > 0) await this.feeModel.create([{ enterpriseId, saleId, baseCents, rateBps, feeCents, period: periodOf(), channel: 'online', collected: true }], { session });
     return Math.max(0, feeCents);
+  }
+
+  /**
+   * Taxa da LOJA ONLINE em pedido pago na entrega (dinheiro, maquininha, Pix na mão): o Mercado Pago não separou nada,
+   * então vira dívida e entra na fatura (não conta para o teto do balcão).
+   */
+  async recordUncollectedOnlineFee(enterpriseId: string, saleId: Types.ObjectId, baseCents: number, rateBps: number, session: ClientSession): Promise<number> {
+    const enterprise = await this.enterpriseService.lockForBilling(enterpriseId, session);
+    if (!enterprise || feeWaived(enterprise) || isFreeMonth(enterprise, periodOf())) return 0;
+    const feeCents = onlineFeeCents(baseCents, rateBps);
+    if (feeCents > 0) {
+      await this.enterpriseService.addDebt(enterpriseId, feeCents, session);
+      await this.feeModel.create([{ enterpriseId, saleId, baseCents, rateBps, feeCents, period: periodOf(), channel: 'online', collected: false }], { session });
+    }
+    return feeCents;
   }
 
   /** Pagamento online devolvido ao comprador: a comissão volta junto no Mercado Pago; marca no registro. */
@@ -227,7 +245,7 @@ export class BillingService {
     throw new ConflictException('Não há taxa em aberto para pagar');
   }
 
-  /** Gera (ou reaproveita) o link de pagamento da fatura na InfinitePay (Pix ou cartão). */
+  /** Gera (ou reaproveita) o link de pagamento da fatura no Mercado Pago (Pix ou cartão), na conta do Balcão. */
   async payInvoice(enterpriseId: string, invoiceId: string) {
     const invoice = await this.invoiceModel.findOne({ _id: invoiceId, enterpriseId });
     if (!invoice) throw new NotFoundException('Fatura não encontrada');
@@ -247,19 +265,20 @@ export class BillingService {
     }
 
     const enterprise = await this.enterpriseService.findEnterpriseById(enterpriseId);
-    const orderNsu = String(invoice._id);
+    const id = String(invoice._id);
     const api = (this.config.get<string>('APP_URL') ?? '').replace(/\/$/, '');
     const front = (this.config.get<string>('FRONTEND_URL') ?? '').replace(/\/$/, '');
     try {
-      const link = await this.pay.createCheckoutLink({
-        orderNsu,
-        amountCents: invoice.amountCents,
-        description: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`,
-        redirectUrl: front ? `${front}/app/pagamento` : undefined,
-        webhookUrl: api ? `${api}/billing/webhook/infinitepay?s=${this.pay.webhookToken(orderNsu)}` : undefined,
-        customer: { name: enterprise.name, email: enterprise.email },
+      const pref = await this.mp.createPreference({
+        accessToken: this.mp.platformToken,
+        orderId: id,
+        items: [{ title: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`, quantity: 1, unitCents: invoice.amountCents }],
+        payer: { name: enterprise.name, email: enterprise.email },
+        backUrl: `${front}/app/pagamento?fatura=${id}`,
+        notificationUrl: api.startsWith('https://') ? `${api}/billing/webhook/mercadopago?i=${id}&s=${sign('invoice', id)}` : undefined,
+        statementDescriptor: 'BALCAO ERP',
       });
-      const updated = await this.invoiceModel.findByIdAndUpdate(invoice._id, { $set: { checkoutUrl: link.url, checkoutSlug: link.slug } }, { returnDocument: 'after' });
+      const updated = await this.invoiceModel.findByIdAndUpdate(invoice._id, { $set: { checkoutUrl: pref.initPoint, preferenceId: pref.id } }, { returnDocument: 'after' });
       return this.present(updated!);
     } catch (e) {
       await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: { checkoutLockedAt: null } }); // libera nova tentativa
@@ -269,44 +288,46 @@ export class BillingService {
 
   // ------------------------------------------------------------------ confirmação do pagamento
 
-  /** Webhook da InfinitePay (não assinado): token na URL + reconfirmação no payment_check. */
-  async handleInfinitePayWebhook(input: { token?: unknown; body: Record<string, unknown> }): Promise<{ received: true; outcome: string }> {
-    const orderNsu = String(input.body?.order_nsu ?? '');
-    if (!Types.ObjectId.isValid(orderNsu) || !/^[a-f0-9]{24}$/i.test(orderNsu)) return { received: true, outcome: 'invoice_not_found' };
-    if (!this.pay.verifyWebhookToken(orderNsu, input.token)) throw new UnauthorizedException('Token inválido');
-
-    const transactionNsu = String(input.body.transaction_nsu ?? '');
-    const slug = String(input.body.invoice_slug ?? input.body.slug ?? '');
-    const outcome = await this.confirm(orderNsu, transactionNsu, slug);
+  /** Webhook do Mercado Pago para faturas: token por fatura na URL (+ x-signature, se configurado) e consulta do pagamento. */
+  async handleMercadoPagoWebhook(q: Record<string, unknown>, body: Record<string, any>, headers: { signature?: string; requestId?: string } = {}): Promise<{ received: true; outcome: string }> {
+    const id = String(q.i ?? '');
+    if (!/^[a-f0-9]{24}$/i.test(id)) return { received: true, outcome: 'invoice_not_found' };
+    if (!verifySigned('invoice', id, q.s)) throw new UnauthorizedException('Token inválido');
+    const topic = String(q.type ?? q.topic ?? body?.type ?? body?.topic ?? '');
+    const paymentId = String(q['data.id'] ?? body?.data?.id ?? (topic === 'payment' ? q.id ?? '' : ''));
+    if (topic !== 'payment' || !/^\d{1,20}$/.test(paymentId)) return { received: true, outcome: 'ignored' };
+    if (headers.signature && !this.mp.verifySignature(paymentId, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
+    const outcome = await this.confirm(id, paymentId);
     await this.eventModel
-      .create({ orderNsu, transactionNsu, invoiceId: new Types.ObjectId(orderNsu), outcome, raw: this.safeRaw(input.body) })
+      .create({ invoiceId: new Types.ObjectId(id), paymentId, outcome, raw: { topic, paymentId } })
       .catch((e) => this.logger.warn(`Falha ao registrar evento: ${e.message}`));
     return { received: true, outcome };
   }
 
   /** A empresa volta do checkout e confirma (caso o webhook demore). Só vale para fatura dela. */
-  async confirmFromRedirect(enterpriseId: string, invoiceId: string, p: { transactionNsu: string; slug: string }) {
+  async confirmFromRedirect(enterpriseId: string, invoiceId: string, p: { paymentId: string }) {
     const invoice = await this.invoiceModel.findOne({ _id: invoiceId, enterpriseId });
     if (!invoice) throw new NotFoundException('Fatura não encontrada');
-    const outcome = await this.confirm(String(invoice._id), p.transactionNsu, p.slug);
+    const outcome = await this.confirm(String(invoice._id), p.paymentId);
     return { outcome, invoice: this.present((await this.invoiceModel.findById(invoice._id)) ?? invoice) };
   }
 
-  private async confirm(orderNsu: string, transactionNsu: string, slug: string): Promise<string> {
-    const invoice = await this.invoiceModel.findById(orderNsu);
+  /** Consulta o pagamento no Mercado Pago (conta do Balcão) e baixa a fatura se estiver aprovado com o valor certo. */
+  private async confirm(invoiceId: string, paymentId: string): Promise<string> {
+    const invoice = await crossTenant(this.invoiceModel, 'pagamento: fatura vinda do webhook (token assinado) ou da empresa já conferida').findById(invoiceId);
     if (!invoice) return 'invoice_not_found';
     if (invoice.status === 'paid') return 'already_paid';
     if (invoice.status !== 'pending') return 'ignored';
-    if (!transactionNsu || !slug) return 'unverifiable';
+    if (!/^\d{1,20}$/.test(paymentId)) return 'unverifiable';
 
-    const check = await this.pay.paymentCheck({ orderNsu, transactionNsu, slug });
-    if (!check.paid) return 'not_paid';
-    // O link foi criado com o valor da fatura; pagamento por outro valor não baixa nada.
-    if (check.amountCents !== invoice.amountCents || (check.paidAmountCents ?? 0) < invoice.amountCents) {
-      this.logger.error(`Valor divergente na fatura ${orderNsu}: esperado=${invoice.amountCents} amount=${check.amountCents} pago=${check.paidAmountCents}`);
+    const pay = await this.mp.payment(paymentId, this.mp.platformToken);
+    if (pay.externalReference !== invoiceId) { this.logger.warn(`Pagamento ${paymentId} não é da fatura ${invoiceId}`); return 'not_this_invoice'; }
+    if (pay.status !== 'approved') return 'not_paid';
+    if (pay.amountCents < invoice.amountCents) {
+      this.logger.error(`Valor divergente na fatura ${invoiceId}: esperado=${invoice.amountCents} pago=${pay.amountCents}`);
       return 'amount_mismatch';
     }
-    await this.markPaid(invoice._id, { via: 'infinitepay', transactionNsu, captureMethod: check.captureMethod, paidAmountCents: check.paidAmountCents });
+    await this.markPaid(invoice._id, { via: 'mercadopago', paymentId: pay.id, method: pay.method ?? undefined, paidAmountCents: pay.amountCents });
     return 'applied';
   }
 
@@ -317,9 +338,9 @@ export class BillingService {
       let changed = false;
       await session.withTransaction(async () => {
         changed = false;
-        const invoice = await this.invoiceModel.findOneAndUpdate(
+        const invoice = await crossTenant(this.invoiceModel, 'baixa da fatura já identificada (webhook, cartão ou admin)').findOneAndUpdate(
           { _id: invoiceId, status: 'pending' },
-          { $set: { status: 'paid', paidAt: new Date(), paidVia: info.via, transactionNsu: info.transactionNsu ?? null, captureMethod: info.captureMethod ?? null, paidAmountCents: info.paidAmountCents ?? null, note: info.note ?? null } },
+          { $set: { status: 'paid', paidAt: new Date(), paidVia: info.via, paymentId: info.paymentId ?? null, paymentMethod: info.method ?? null, paidAmountCents: info.paidAmountCents ?? null, note: info.note ?? null } },
           { session },
         );
         if (!invoice) return;
@@ -365,6 +386,82 @@ export class BillingService {
     }
   }
 
+  /**
+   * Reduz o valor de uma fatura pendente (desconto dado pelo admin). A dívida cai junto e o link de pagamento
+   * antigo é descartado (tinha o valor velho); o próximo "pagar" gera um novo.
+   */
+  async adminReduceInvoice(invoiceId: string, amountCents: number, note?: string): Promise<{ invoice: InvoiceDocument; fromCents: number }> {
+    const session = await this.connection.startSession();
+    try {
+      let out: { invoice: InvoiceDocument; fromCents: number } | null = null;
+      await session.withTransaction(async () => {
+        const inv = await this.invoiceModel.findOne({ _id: invoiceId, status: 'pending' }).session(session);
+        if (!inv) throw new ConflictException('Fatura não encontrada ou não está pendente');
+        if (!Number.isInteger(amountCents) || amountCents < 1 || amountCents >= inv.amountCents) throw new ConflictException('O novo valor precisa ser menor que o atual e de pelo menos R$ 0,01 (para zerar, cancele a fatura)');
+        const from = inv.amountCents;
+        inv.amountCents = amountCents;
+        inv.note = note ?? inv.note;
+        inv.checkoutUrl = null; inv.preferenceId = null; inv.checkoutLockedAt = null;
+        await inv.save({ session });
+        await this.enterpriseService.addDebt(String(inv.enterpriseId), -(from - amountCents), session);
+        out = { invoice: inv, fromCents: from };
+      });
+      await this.refreshBlockStatus(String(out!.invoice.enterpriseId));
+      return out!;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  /**
+   * Mês grátis: o mês não gera taxa. O que já foi lançado e não pago é estornado; faturas pendentes daquele mês
+   * são reduzidas (ou canceladas, se zerarem). O que já foi pago não volta sozinho: vai em `alreadyPaidCents`.
+   */
+  async adminGrantFreeMonth(enterpriseId: string, period: string) {
+    const problem = freeMonthProblem(period);
+    if (problem) throw new ConflictException(problem);
+    const session = await this.connection.startSession();
+    const out = { period, reversedCents: 0, invoicesAdjusted: 0, invoicesCancelled: 0, alreadyPaidCents: 0 };
+    try {
+      await session.withTransaction(async () => {
+        Object.assign(out, { reversedCents: 0, invoicesAdjusted: 0, invoicesCancelled: 0, alreadyPaidCents: 0 });
+        const eid = new Types.ObjectId(enterpriseId);
+        await this.enterpriseService.addFreeMonth(enterpriseId, period, session);
+        const fees = await this.feeModel.find({ enterpriseId: eid, period, reversedAt: null, collected: { $ne: true } }).session(session).lean();
+        const byInvoice = new Map<string, number>();
+        let loose = 0;
+        for (const f of fees) { if (f.invoiceId) byInvoice.set(String(f.invoiceId), (byInvoice.get(String(f.invoiceId)) ?? 0) + f.feeCents); else loose += f.feeCents; }
+        const invs = byInvoice.size ? await this.invoiceModel.find({ _id: { $in: [...byInvoice.keys()].map((x) => new Types.ObjectId(x)) } }).session(session) : [];
+        const reversible = new Set<string>(['__loose__']);
+        for (const inv of invs) {
+          const cut = byInvoice.get(String(inv._id)) ?? 0;
+          if (inv.status === 'paid') { out.alreadyPaidCents += cut; continue; }
+          if (inv.status !== 'pending') continue;
+          reversible.add(String(inv._id));
+          out.reversedCents += cut;
+          const left = inv.amountCents - cut;
+          if (left <= 0) { inv.status = 'cancelled'; out.invoicesCancelled++; } else { inv.amountCents = left; out.invoicesAdjusted++; }
+          inv.note = `Mês grátis ${period}`; inv.checkoutUrl = null; inv.preferenceId = null; inv.checkoutLockedAt = null;
+          await inv.save({ session });
+        }
+        out.reversedCents += loose;
+        const ids = fees.filter((f) => !f.invoiceId || reversible.has(String(f.invoiceId))).map((f) => f._id);
+        if (ids.length) await this.feeModel.updateMany({ _id: { $in: ids } }, { $set: { reversedAt: new Date() } }, { session });
+        if (out.reversedCents) await this.enterpriseService.addDebt(enterpriseId, -out.reversedCents, session);
+      });
+      await this.refreshBlockStatus(enterpriseId);
+      return out;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  /** Tira um mês grátis (vale para as próximas vendas daquele mês; o que já foi estornado não volta). */
+  async adminRevokeFreeMonth(enterpriseId: string, period: string) {
+    await this.enterpriseService.removeFreeMonth(enterpriseId, period);
+    return { period };
+  }
+
   /** Estende o prazo (a partir de hoje, ou do vencimento atual se ainda não venceu). Desbloqueia se não houver outra vencida. */
   async adminExtendInvoice(invoiceId: string, days: number, note?: string): Promise<InvoiceDocument> {
     const inv = await this.invoiceModel.findOne({ _id: invoiceId, status: 'pending' });
@@ -387,7 +484,7 @@ export class BillingService {
 
   /** Só reavalia bloqueios (barato; roda de hora em hora para o bloqueio não esperar a meia-noite). */
   async runBlockCheck(now: Date = new Date()) {
-    const overdue = await this.invoiceModel.distinct('enterpriseId', { status: 'pending', dueDate: { $lte: now } });
+    const overdue = await crossTenant(this.invoiceModel, 'rotina: percorre as faturas de todas as lojas').distinct('enterpriseId', { status: 'pending', dueDate: { $lte: now } });
     for (const id of overdue) {
       try { await this.refreshBlockStatus(String(id)); } catch (e) { this.logger.error(`Falha ao atualizar bloqueio de ${id}: ${(e as Error).message}`); }
     }
@@ -400,7 +497,7 @@ export class BillingService {
   async runDailyClose(now: Date = new Date()) {
     const current = periodOf(now);
     const dueDate = dueDateFrom(now, graceDays(this.config.get('BILLING_GRACE_DAYS')));
-    const toInvoice = await this.feeModel.distinct('enterpriseId', { invoiceId: null, reversedAt: null, collected: { $ne: true }, period: { $lt: current } });
+    const toInvoice = await crossTenant(this.feeModel, 'rotina: taxas sem fatura de todas as lojas').distinct('enterpriseId', { invoiceId: null, reversedAt: null, collected: { $ne: true }, period: { $lt: current } });
     for (const id of toInvoice) {
       try {
         const inv = await this.issueInvoice(String(id), { kind: 'monthly', dueDate, beforePeriod: current });
@@ -427,17 +524,12 @@ export class BillingService {
       overdue: i.status === 'pending' && i.dueDate <= new Date(),
       paidAt: i.paidAt,
       paidVia: i.paidVia,
-      captureMethod: i.captureMethod,
+      paymentMethod: i.paymentMethod,
       checkoutUrl: i.checkoutUrl,
       note: i.note,
     };
   }
 
-  /** Guarda só campos conhecidos do corpo do webhook (nada de dados do pagador). */
-  private safeRaw(b: Record<string, unknown>) {
-    const keep = ['order_nsu', 'transaction_nsu', 'invoice_slug', 'slug', 'amount', 'paid_amount', 'installments', 'capture_method'];
-    return Object.fromEntries(keep.filter((k) => k in b).map((k) => [k, b[k]]));
-  }
 
   private paymentRequired(code: string, message: string) {
     return new HttpException({ statusCode: HttpStatus.PAYMENT_REQUIRED, code, message }, HttpStatus.PAYMENT_REQUIRED);

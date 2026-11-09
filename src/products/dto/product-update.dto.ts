@@ -1,5 +1,6 @@
 import { IsBoolean, IsInt, IsMongoId, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf } from 'class-validator';
-import { IMAGE_RE } from './product-create.dto';
+import { ArrayMaxSize, IsArray } from 'class-validator';
+import { IMAGE_RE, MAX_IMAGES } from './product-create.dto';
 
 export class ProductUpdateDto {
   @IsOptional() @IsNotEmpty() @IsString() @MaxLength(120)
@@ -29,6 +30,11 @@ export class ProductUpdateDto {
   @IsOptional() @ValidateIf((o) => o.image !== '') @IsString() @MaxLength(400_000) @Matches(IMAGE_RE, { message: 'Imagem inválida' })
   image?: string;
 
+  /** Até 8 fotos; a primeira vira a capa. Substitui a lista inteira. */
+  @IsOptional() @IsArray() @ArrayMaxSize(MAX_IMAGES, { message: `Até ${MAX_IMAGES} fotos por produto` })
+  @IsString({ each: true }) @MaxLength(400_000, { each: true }) @Matches(IMAGE_RE, { each: true, message: 'Imagem inválida' })
+  images?: string[];
+
   @IsOptional() @IsMongoId()
   categoryId?: string;
 
@@ -48,4 +54,8 @@ export class ProductUpdateDto {
 
   @IsOptional() @ValidateIf((o) => o.lengthCm !== null) @IsInt() @Min(1) @Max(200)
   lengthCm?: number | null;
+
+  /** Preço na loja online (reais). null/0 = usa o preço do balcão. */
+  @IsOptional() @ValidateIf((o) => o.onlinePrice !== null) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(10_000_000)
+  onlinePrice?: number | null;
 }

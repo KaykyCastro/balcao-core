@@ -54,7 +54,7 @@ describe('app do celular', () => {
   it('rota de resgate: válido -> cookie + tela de vendas embutida; inválido -> login', async () => {
     const res = () => { const r: any = { headers: {}, setHeader: jest.fn((k, v) => { r.headers[k] = v; }), cookie: jest.fn(), redirect: jest.fn() }; return r; };
     const { svc, config } = setup();
-    const ctl = new AuthController(svc, {} as any, config as any);
+    const ctl = new AuthController(svc, {} as any, config as any, {} as any);
     const ok = res();
     await ctl.redeem('d'.repeat(64), ok);
     expect(ok.cookie).toHaveBeenCalledWith('erp_session', 'tok-default', expect.objectContaining({ httpOnly: true }));
@@ -62,14 +62,14 @@ describe('app do celular', () => {
     expect(ok.headers['Referrer-Policy']).toBe('no-referrer');
 
     const bad = res();
-    await new AuthController(setup({ found: null }).svc, {} as any, config as any).redeem('e'.repeat(64), bad);
+    await new AuthController(setup({ found: null }).svc, {} as any, config as any, {} as any).redeem('e'.repeat(64), bad);
     expect(bad.cookie).not.toHaveBeenCalled();
     expect(bad.redirect).toHaveBeenCalledWith(302, 'https://app.loja.com/entrar');
   });
 
   it('pedido do link usa a URL pública da API', async () => {
     const { svc, config } = setup();
-    const ctl = new AuthController(svc, {} as any, config as any);
+    const ctl = new AuthController(svc, {} as any, config as any, {} as any);
     const r = await ctl.handoff(EID, {}, { protocol: 'http', get: () => 'x' } as any);
     expect(r.url).toMatch(/^https:\/\/api\.loja\.com\/auth\/handoff\/[a-f0-9]{64}$/);
   });

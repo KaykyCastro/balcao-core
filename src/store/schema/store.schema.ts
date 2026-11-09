@@ -1,15 +1,24 @@
+import { BODY_FONT_KEYS, FONT_KEYS } from '../fonts.rules';
 import { Prop, Schema, SchemaFactory, raw } from '@nestjs/mongoose';
 import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
 
 export type StoreDocument = HydratedDocument<Store>;
+/** link: '' | '#produtos' | 'cat:<id>' | 'p:<id>' | 'https://...'; align: left|center; tone: light (texto branco) | dark */
+export interface StoreSlide { image: string; video?: string; title: string; subtitle: string; cta: string; link: string; align: 'left' | 'center'; tone: 'light' | 'dark' }
+/** Vídeo curto ligado a um produto ("vídeos que vendem"). video: 'media:<id>' (enviado) ou https://...mp4 */
+export interface StoreReel { video: string; productId: string; title: string }
+/** Faixa de benefícios abaixo do topo (frete, Pix, parcelamento...). Texto do lojista. */
+export interface StoreHighlight { icon: string; title: string; text: string }
 
 /** Loja online de uma empresa (uma por empresa). */
+import type { SitePage } from '../builder.rules';
+
 @Schema({ timestamps: true })
 export class Store {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'EnterpriseSchema', required: true, unique: true })
   enterpriseId: Types.ObjectId;
 
-  /** Loja no ar. Só liga com InfiniteTag e ao menos uma forma de entrega. */
+  /** Loja no ar. Só liga com o Mercado Pago conectado e ao menos uma forma de entrega. */
   @Prop({ default: false, index: true })
   enabled: boolean;
 
@@ -53,22 +62,92 @@ export class Store {
   @Prop({ default: '', maxlength: 160 })
   notice: string;
 
+  /** Horário de funcionamento, em texto (ex.: "Ter a dom, 18h às 0h"). */
+  @Prop({ default: '', maxlength: 120 })
+  hours: string;
+
+  /** Banners deslizantes do topo (tema "carousel"). Até 6. */
+  @Prop({ type: [{ image: String, video: String, title: String, subtitle: String, cta: String, link: String, align: String, tone: String, _id: false }], default: [] })
+  slides: StoreSlide[];
+
   @Prop(raw({
     accent: { type: String, default: '#FF3D00' },
-    background: { type: String, enum: ['light', 'warm', 'dark'], default: 'light' },
-    font: { type: String, enum: ['modern', 'elegant', 'classic'], default: 'modern' },
+    background: { type: String, enum: ['light', 'warm', 'dark', 'custom'], default: 'light' },
+    /** Fundo 'custom': cor livre; cartões e texto são calculados para manter o contraste. */
+    bgColor: { type: String, default: '#ffffff' },
+    font: { type: String, enum: [...FONT_KEYS], default: 'modern' },
+    bodyFont: { type: String, enum: [...BODY_FONT_KEYS], default: 'modern' },
     corners: { type: String, enum: ['rounded', 'soft', 'square'], default: 'rounded' },
     columns: { type: Number, enum: [2, 3, 4], default: 3 },
-    hero: { type: String, enum: ['banner', 'simple', 'split'], default: 'banner' },
+    hero: { type: String, enum: ['carousel', 'banner', 'simple', 'split', 'duo'], default: 'banner' },
+    autoplaySec: { type: Number, default: 5 },
+    heroHeight: { type: String, enum: ['compact', 'large'], default: 'large' },
     showStock: { type: Boolean, default: false },
+    layout: { type: String, enum: ['classic', 'fashion', 'beauty', 'market', 'menu', 'bistro', 'delivery', 'atelier', 'jewel', 'street', 'boutique', 'retail', 'glow'], default: 'classic' },
+    /** Cabeçalho: classic (busca e botão de carrinho) ou editorial (logo, categorias e ícones, como lojas de moda). */
+    header: { type: String, enum: ['classic', 'editorial', 'centered', 'split', 'bar'], default: 'classic' },
+    /** Parcelas sem juros que a loja oferece (0 = não mostra "ou 6x de..." no preço). */
+    installments: { type: Number, default: 0, min: 0, max: 12 },
   }))
-  theme: { accent: string; background: 'light' | 'warm' | 'dark'; font: 'modern' | 'elegant' | 'classic'; corners: 'rounded' | 'soft' | 'square'; columns: 2 | 3 | 4; hero: 'banner' | 'simple' | 'split'; showStock: boolean };
+  theme: { accent: string; background: 'light' | 'warm' | 'dark' | 'custom'; bgColor: string; font: string; bodyFont: string; corners: 'rounded' | 'soft' | 'square'; columns: 2 | 3 | 4; hero: 'carousel' | 'banner' | 'simple' | 'split' | 'duo'; autoplaySec: number; heroHeight: 'compact' | 'large'; showStock: boolean; layout: 'classic' | 'fashion' | 'beauty' | 'market' | 'menu' | 'bistro' | 'delivery' | 'atelier' | 'jewel' | 'street' | 'boutique' | 'retail' | 'glow'; header?: 'classic' | 'editorial' | 'centered' | 'split' | 'bar'; installments?: number };
+
+  @Prop({ type: [{ video: String, productId: String, title: String, _id: false }], default: [] })
+  reels: StoreReel[];
+
+  @Prop({ default: '', maxlength: 60 })
+  reelsTitle: string;
+
+  @Prop({ type: [{ icon: String, title: String, text: String, _id: false }], default: [] })
+  highlights: StoreHighlight[];
+
+  /** Pagar na entrega/retirada (cardápio e loja virtual): formas aceitas. */
+  @Prop(raw({ enabled: { type: Boolean, default: false }, methods: { type: [String], default: ['cash', 'card', 'pix'] } }))
+  payOnDelivery: { enabled: boolean; methods: string[] };
+
+  /** Como a loja funciona: e-commerce, loja virtual ou cardápio (null = loja antiga; ver modeOf). */
+  @Prop({ type: String, enum: ['ecommerce', 'whatsapp', 'catalog', 'menu'], default: null })
+  mode: 'ecommerce' | 'whatsapp' | 'catalog' | 'menu' | null;
+
+  /**
+   * Site montado pelo lojista no construtor (seções → componentes). `page` é o que está no ar; `pageDraft` é o rascunho
+   * que o construtor salva enquanto o lojista edita. Validados por store/builder.rules.ts. Sem página = vitrine padrão.
+   */
+  @Prop({ type: MongooseSchema.Types.Mixed, default: null })
+  page: SitePage | null;
+
+  @Prop({ type: MongooseSchema.Types.Mixed, default: null })
+  pageDraft: SitePage | null;
+
+  @Prop({ type: Date, default: null })
+  pagePublishedAt: Date | null;
+
+  /** Aba do navegador e buscadores: título, descrição e favicon próprios. */
+  @Prop(raw({ title: { type: String, default: '' }, description: { type: String, default: '' }, favicon: { type: String, default: '' } }))
+  seo: { title: string; description: string; favicon: string };
+
+  /**
+   * Mesas (modo cardápio): o cliente lê o QR Code da mesa.
+   * payment 'tab' = comanda: pede sem pagar e paga no fim, quando o garçom (ou o sistema) libera.
+   * payment 'upfront' = paga cada pedido na hora, pelo celular.
+   */
+  @Prop(raw({
+    enabled: { type: Boolean, default: false }, count: { type: Number, default: 10 }, label: { type: String, default: 'Mesa' },
+    payment: { type: String, enum: ['tab', 'upfront'], default: 'tab' }, serviceRateBps: { type: Number, default: 0 },
+  }))
+  tables: { enabled: boolean; count: number; label: string; payment?: 'tab' | 'upfront'; serviceRateBps?: number };
 
   @Prop(raw({ whatsapp: { type: String, default: '' }, instagram: { type: String, default: '' }, email: { type: String, default: '' } }))
   contacts: { whatsapp: string; instagram: string; email: string };
 
   @Prop(raw({ exchange: { type: String, default: '' }, shipping: { type: String, default: '' } }))
   policies: { exchange: string; shipping: string };
+
+  /**
+   * Quem vende (Decreto 7.962/2013, art. 2º): nome empresarial, CPF/CNPJ, endereço físico e eletrônico.
+   * Aparece no rodapé e nas políticas da loja. Obrigatório para ligar a loja.
+   */
+  @Prop(raw({ name: { type: String, default: '' }, document: { type: String, default: '' }, address: { type: String, default: '' }, email: { type: String, default: '' }, phone: { type: String, default: '' } }))
+  legal: { name: string; document: string; address: string; email: string; phone: string };
 
   /** Conta Mercado Pago do lojista, conectada por OAuth. Tokens cifrados e nunca enviados ao navegador. */
   @Prop(raw({
@@ -80,6 +159,10 @@ export class Store {
 
   @Prop({ default: 0, min: 0 })
   minOrderCents: number;
+
+  /** Cashback da loja: % do que o cliente paga pelos produtos volta como crédito para a próxima compra aqui. */
+  @Prop(raw({ enabled: { type: Boolean, default: false }, rateBps: { type: Number, default: 500 }, expiresDays: { type: Number, default: 90 } }))
+  cashback: { enabled: boolean; rateBps: number; expiresDays: number };
 
   @Prop(raw({
     pickup: { enabled: { type: Boolean, default: false }, address: { type: String, default: '' }, instructions: { type: String, default: '' } },
@@ -97,6 +180,12 @@ export class Store {
       handlingDays: { type: Number, default: 1 }, extraFeeCents: { type: Number, default: 0 }, freeAboveCents: { type: Number, default: null },
       tokenSealed: { type: String, default: null, select: false },
       tokenHint: { type: String, default: '' },
+      /** Remetente das etiquetas (endereço completo, como a transportadora pede). */
+      sender: {
+        name: { type: String, default: '' }, phone: { type: String, default: '' }, email: { type: String, default: '' }, document: { type: String, default: '' },
+        street: { type: String, default: '' }, number: { type: String, default: '' }, complement: { type: String, default: '' },
+        district: { type: String, default: '' }, city: { type: String, default: '' }, state: { type: String, default: '' },
+      },
     },
     package: { weightGrams: { type: Number, default: 300 }, heightCm: { type: Number, default: 4 }, widthCm: { type: Number, default: 20 }, lengthCm: { type: Number, default: 25 } },
   }))
@@ -109,9 +198,17 @@ export class Store {
   @Prop(raw({ onlineRateBps: Number, directoryRateBps: Number }))
   feeAcceptedRates?: { onlineRateBps: number; directoryRateBps: number } | null;
 
+  /** Bloqueio pela plataforma (denúncia, dados falsos, descumprimento das regras). Tira a loja do ar e impede religar. */
+  @Prop(raw({ at: { type: Date, default: null }, reason: { type: String, default: '' }, by: { type: String, default: '' } }))
+  adminBlock?: { at: Date | null; reason: string; by: string } | null;
+
   /** Número sequencial dos pedidos desta loja (#1001, #1002...). */
   @Prop({ default: 1000 })
   orderSeq: number;
+
+  /** Numeração das comandas (#1, #2...). */
+  @Prop({ default: 0 })
+  tabSeq: number;
 }
 
 export const StoreSchemaFactory = SchemaFactory.createForClass(Store);

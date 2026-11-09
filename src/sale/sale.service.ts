@@ -13,6 +13,8 @@ import { PromotionService } from '../promotion/promotion.service';
 import { PaginationQueryDto, Paginated } from '../common/dto/pagination-query.dto';
 import { toCents } from '../common/money';
 import { isDuplicateKeyError } from '../common/mongo';
+import { promoUnits, promotionStatus } from '../promotion/promotion.rules';
+import { applySaleDiscount, DEFAULT_STAFF_MAX_DISCOUNT_BPS, type SaleDiscountInput } from './discount.rules';
 
 @Injectable()
 export class SaleService {
@@ -25,13 +27,41 @@ export class SaleService {
     private readonly promotionService: PromotionService,
   ) {}
 
-  async create(enterpriseId: string, dto: SaleCreateDto, idempotencyKey?: string): Promise<SaleDocument> {
+  /**
+   * Total do carrinho agora, sem reservar nada (para cobrar na maquininha ou no Pix antes de registrar a venda).
+   * A venda depois recalcula dentro da transação; se uma promoção acabar no meio, a diferença fica registrada.
+   */
+  /** Teto de desconto do colaborador (pontos-base); null = dono, sem teto. */
+  private async staffDiscountCap(enterpriseId: string, staff?: { id: string } | null): Promise<number | null> {
+    if (!staff) return null;
+    const e = await this.connection.collection('enterpriseschemas').findOne({ _id: new Types.ObjectId(enterpriseId) }, { projection: { staffMaxDiscountBps: 1 } });
+    return typeof e?.staffMaxDiscountBps === 'number' ? e.staffMaxDiscountBps : DEFAULT_STAFF_MAX_DISCOUNT_BPS;
+  }
+
+  async quote(enterpriseId: string, items: { productId: string; quantity: number }[], discount?: SaleDiscountInput | null, staff?: { id: string } | null): Promise<{ totalCents: number; subtotalCents: number; discountCents: number }> {
+    const quantities = new Map<string, number>();
+    for (const { productId, quantity } of items) quantities.set(productId, (quantities.get(productId) ?? 0) + quantity);
+    const promos = await this.promotionService.activeFor(enterpriseId, [...quantities.keys()]);
+    let totalCents = 0;
+    for (const [productId, quantity] of quantities) {
+      const p = await this.productService.getProductById(enterpriseId, productId);
+      if (p.trackStock !== false && p.quantity < quantity) throw new ConflictException(`${p.name}: só há ${p.quantity} em estoque`);
+      const normal = toCents(effectivePrice(p));
+      const pr = promos.get(productId);
+      const promoQty = pr && promotionStatus(pr) === 'active' && pr.promoPriceCents < normal ? Math.min(quantity, promoUnits(pr, quantity)) : 0;
+      totalCents += promoQty * (pr?.promoPriceCents ?? 0) + (quantity - promoQty) * normal;
+    }
+    const off = applySaleDiscount(totalCents, discount, await this.staffDiscountCap(enterpriseId, staff));
+    return { subtotalCents: totalCents, discountCents: off, totalCents: totalCents - off };
+  }
+
+  async create(enterpriseId: string, dto: SaleCreateDto, idempotencyKey?: string, payment?: Sale['payment'], staff?: { id: string; name: string } | null): Promise<SaleDocument> {
     if (idempotencyKey) {
       const prev = await this.saleModel.findOne({ enterpriseId, idempotencyKey });
       if (prev) return prev; // repetição do mesmo pedido: devolve a venda já feita
     }
     try {
-      return await this.createOnce(enterpriseId, dto, idempotencyKey);
+      return await this.createOnce(enterpriseId, dto, idempotencyKey, payment, staff);
     } catch (e) {
       // Duas requisições simultâneas com a mesma chave: a segunda perde a corrida e recebe a venda da primeira.
       if (idempotencyKey && isDuplicateKeyError(e)) {
@@ -42,10 +72,11 @@ export class SaleService {
     }
   }
 
-  private async createOnce(enterpriseId: string, dto: SaleCreateDto, idempotencyKey?: string): Promise<SaleDocument> {
+  private async createOnce(enterpriseId: string, dto: SaleCreateDto, idempotencyKey?: string, payment?: Sale['payment'], staff?: { id: string; name: string } | null): Promise<SaleDocument> {
     const isFiado = dto.paymentMethod === 'fiado';
     if (isFiado && !dto.customerId) throw new BadRequestException('Venda com pagamento posterior exige um cliente');
     if (dto.customerId) await this.customerService.getCustomerById(enterpriseId, dto.customerId); // 404 se não for da empresa
+    if (isFiado) await this.customerService.assertCanOwe(enterpriseId, dto.customerId!); // conta do marketplace só depois de pertencer à loja
 
     // Junta linhas repetidas do mesmo produto.
     const quantities = new Map<string, number>();
@@ -56,6 +87,7 @@ export class SaleService {
     const products = new Map<string, Awaited<ReturnType<ProductService['getProductById']>>>();
     for (const productId of quantities.keys()) products.set(productId, await this.productService.getProductById(enterpriseId, productId));
 
+    const discountCap = dto.discount ? await this.staffDiscountCap(enterpriseId, staff) : null;
     const saleId = new Types.ObjectId();
     const session = await this.connection.startSession();
     try {
@@ -86,6 +118,11 @@ export class SaleService {
           }
         }
 
+        // Desconto do carrinho: sobre o total já com promoções; nunca zera a venda; colaborador tem teto.
+        const subtotalCents = totalCents;
+        const discountCents = applySaleDiscount(subtotalCents, dto.discount, discountCap);
+        totalCents = subtotalCents - discountCents;
+
         const cash = cashChange(dto.paymentMethod, totalCents, dto.cashReceivedCents); // valor recebido x total final
 
         // Taxa de 0,5% + teto de R$ 40: se bloqueado, lança 402 e a transação inteira é desfeita.
@@ -101,8 +138,11 @@ export class SaleService {
               paymentMethod: dto.paymentMethod,
               items,
               totalCents,
+              ...(discountCents > 0 ? { subtotalCents, discountCents, discount: { mode: dto.discount!.mode, value: dto.discount!.value, ...(dto.discount!.reason?.trim() ? { reason: dto.discount!.reason.trim() } : {}) } } : {}),
               feeCents,
               ...cash,
+              ...(payment ? { payment } : {}),
+              ...(staff ? { staff: { id: new Types.ObjectId(staff.id), name: staff.name } } : {}),
               ...(idempotencyKey ? { idempotencyKey } : {}),
             },
           ],
@@ -187,14 +227,50 @@ export class SaleService {
    * Pedido online pago: registra a venda (estoque e promoção já foram reservados no pedido) e lança a taxa da loja online.
    * Roda dentro da transação do pedido. A taxa entra mesmo com a conta bloqueada: o cliente já pagou.
    */
-  async recordOnlineSale(enterpriseId: string, p: { orderId: Types.ObjectId; items: SaleItem[]; totalCents: number; rateBps: number; collectedFeeCents: number }, session: ClientSession): Promise<SaleDocument> {
+  async recordOnlineSale(enterpriseId: string, p: { orderId: Types.ObjectId; items: SaleItem[]; totalCents: number; rateBps: number; collectedFeeCents: number; customerId?: Types.ObjectId | null }, session: ClientSession): Promise<SaleDocument> {
     const saleId = new Types.ObjectId();
     // Taxa da loja online: o Mercado Pago já separou (marketplace_fee). Só registra; não entra na fatura nem no teto.
     const feeCents = await this.billingService.recordCollectedFee(enterpriseId, saleId, p.totalCents, p.rateBps, p.collectedFeeCents, session);
     const [created] = await this.saleModel.create(
-      [{ _id: saleId, enterpriseId, customerId: null, paymentMethod: 'online', channel: 'online', orderId: p.orderId, items: p.items, totalCents: p.totalCents, feeCents, cashReceivedCents: null, changeCents: null }],
+      [{ _id: saleId, enterpriseId, customerId: p.customerId ?? null, paymentMethod: 'online', channel: 'online', orderId: p.orderId, items: p.items, totalCents: p.totalCents, feeCents, cashReceivedCents: null, changeCents: null }],
       { session },
     );
     return created;
+  }
+
+  /** Pedido online pago na entrega/retirada: registra a venda (estoque já reservado) e a taxa da loja online vai para a fatura. */
+  async recordCodSale(enterpriseId: string, p: { orderId: Types.ObjectId; items: SaleItem[]; subtotalCents: number; orderTotalCents: number; rateBps: number; paymentMethod: 'cash' | 'card' | 'pix' | 'other'; cashReceivedCents?: number | null; customerId?: Types.ObjectId | null }, session: ClientSession): Promise<SaleDocument> {
+    const saleId = new Types.ObjectId();
+    const cash = cashChange(p.paymentMethod, p.orderTotalCents, p.cashReceivedCents); // troco sobre o total com a entrega
+    const feeCents = await this.billingService.recordUncollectedOnlineFee(enterpriseId, saleId, p.subtotalCents, p.rateBps, session);
+    const [created] = await this.saleModel.create(
+      [{ _id: saleId, enterpriseId, customerId: p.customerId ?? null, paymentMethod: p.paymentMethod, channel: 'online', orderId: p.orderId, items: p.items, totalCents: p.subtotalCents, feeCents, ...cash }],
+      { session },
+    );
+    return created;
+  }
+
+  /**
+   * Comanda de mesa paga: registra a venda (estoque e promoção já reservados ao lançar cada item).
+   * A taxa do ERP é a do balcão (0,5%, sobre os itens) e entra mesmo com a conta bloqueada: o cliente já consumiu e pagou.
+   */
+  async recordTabSale(enterpriseId: string, p: {
+    tabId: Types.ObjectId; tab: { table: number; number: number; name: string; label: string }; items: SaleItem[]; subtotalCents: number; serviceCents: number;
+    paymentMethod: 'cash' | 'pix' | 'card' | 'other' | 'online'; cashReceivedCents?: number | null; payment?: Sale['payment']; staff?: { id: string; name: string } | null;
+  }, session: ClientSession): Promise<SaleDocument> {
+    const saleId = new Types.ObjectId();
+    const totalCents = p.subtotalCents + p.serviceCents;
+    const cash = cashChange(p.paymentMethod, totalCents, p.cashReceivedCents);
+    const feeCents = await this.billingService.applyFee(enterpriseId, saleId, p.subtotalCents, session, { allowBlocked: true });
+    const [created] = await this.saleModel.create(
+      [{ _id: saleId, enterpriseId, customerId: null, paymentMethod: p.paymentMethod, channel: 'pos', tabId: p.tabId, tab: p.tab, items: p.items, totalCents, serviceCents: p.serviceCents, feeCents, ...cash, ...(p.staff ? { staff: { id: new Types.ObjectId(p.staff.id), name: p.staff.name } } : {}), ...(p.payment ? { payment: p.payment } : {}) }],
+      { session },
+    );
+    return created;
+  }
+
+  /** Compras de um cliente (balcão e online), mais recentes primeiro. Usado em "Minha conta" do comprador. */
+  forCustomer(enterpriseId: string | Types.ObjectId, customerId: string | Types.ObjectId, limit = 60) {
+    return this.saleModel.find({ enterpriseId, customerId, status: 'completed' }).sort({ createdAt: -1 }).limit(limit).lean();
   }
 }

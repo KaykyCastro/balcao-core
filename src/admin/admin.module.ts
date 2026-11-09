@@ -13,12 +13,20 @@ import { ProductSchema, ProductSchemaFactory } from '../products/schema/product.
 import { CustomerSchema, CustomerSchemaFactory } from '../customer/schema/customer.schema';
 import { FeeEntry, FeeEntrySchemaFactory } from '../billing/schema/fee-entry.schema';
 import { Invoice, InvoiceSchemaFactory } from '../billing/schema/invoice.schema';
+import { Store, StoreSchemaFactory } from '../store/schema/store.schema';
+import { Order, OrderSchemaFactory } from '../store/schema/order.schema';
+import { Shopper, ShopperSchemaFactory } from '../shopper/schema/shopper.schema';
+import { ShopperModule } from '../shopper/shopper.module';
+import { StoreModule } from '../store/store.module';
+import { AdminTrustService } from './admin-trust.service';
 
 @Module({
   imports: [
     EnterprisesModule,
     BillingModule,
     MessagesModule,
+    ShopperModule,
+    StoreModule,
     MongooseModule.forFeature([
       { name: AuditLog.name, schema: AuditLogSchemaFactory },
       { name: EnterpriseSchema.name, schema: EnterpriseSchemaFactory },
@@ -27,9 +35,12 @@ import { Invoice, InvoiceSchemaFactory } from '../billing/schema/invoice.schema'
       { name: CustomerSchema.name, schema: CustomerSchemaFactory },
       { name: FeeEntry.name, schema: FeeEntrySchemaFactory },
       { name: Invoice.name, schema: InvoiceSchemaFactory },
+      { name: Store.name, schema: StoreSchemaFactory },
+      { name: Order.name, schema: OrderSchemaFactory },
+      { name: Shopper.name, schema: ShopperSchemaFactory },
     ]),
   ],
   controllers: [AdminController],
-  providers: [AdminService, AdminBootstrap],
+  providers: [AdminService, AdminTrustService, AdminBootstrap],
 })
 export class AdminModule {}

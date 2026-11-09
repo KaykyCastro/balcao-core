@@ -1,6 +1,12 @@
 import { IsBoolean, IsInt, IsMongoId, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf } from 'class-validator';
+import { ArrayMaxSize, IsArray } from 'class-validator';
 
-export const IMAGE_RE = /^(https:\/\/[^\s"'<>]+|data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+)$/;
+export const MAX_IMAGES = 8;
+/**
+ * Imagem: URL do arquivo (enviado ao R2 pelo fluxo de uploads, ou link https externo) ou data URL de cliente antigo,
+ * que a API sobe para o R2 sozinha. http só passa se for a pasta local de desenvolvimento (StorageService.resolve).
+ */
+export const IMAGE_RE = /^(https?:\/\/[^\s"'<>]+|data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+)$/;
 
 export class ProductCreateDto {
   @IsNotEmpty() @IsString() @MaxLength(120)
@@ -33,6 +39,11 @@ export class ProductCreateDto {
   @IsOptional() @ValidateIf((o) => o.image !== '') @IsString() @MaxLength(400_000) @Matches(IMAGE_RE, { message: 'Imagem inválida' })
   image?: string;
 
+  /** Até 8 fotos; a primeira vira a capa. Substitui a lista inteira. */
+  @IsOptional() @IsArray() @ArrayMaxSize(MAX_IMAGES, { message: `Até ${MAX_IMAGES} fotos por produto` })
+  @IsString({ each: true }) @MaxLength(400_000, { each: true }) @Matches(IMAGE_RE, { each: true, message: 'Imagem inválida' })
+  images?: string[];
+
   @IsMongoId()
   categoryId: string;
 
@@ -52,4 +63,8 @@ export class ProductCreateDto {
 
   @IsOptional() @ValidateIf((o) => o.lengthCm !== null) @IsInt() @Min(1) @Max(200)
   lengthCm?: number | null;
+
+  /** Preço na loja online (reais). null/0 = usa o preço do balcão. */
+  @IsOptional() @ValidateIf((o) => o.onlinePrice !== null) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(10_000_000)
+  onlinePrice?: number | null;
 }

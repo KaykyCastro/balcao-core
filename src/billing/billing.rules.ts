@@ -22,3 +22,15 @@ export function feeWaived(e: TrialInfo & { role?: string; feeExempt?: boolean },
   if (inTrial(e, now)) return 'trial';
   return null;
 }
+
+/** Mês ('YYYY-MM') válido para mês grátis: formato certo e no máximo 12 meses para a frente. */
+export function freeMonthProblem(period: string, now = new Date()): string | null {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) return 'Mês inválido (use AAAA-MM)';
+  const [y, m] = period.split('-').map(Number);
+  const months = (y - now.getUTCFullYear()) * 12 + (m - 1 - now.getUTCMonth());
+  if (months > 12) return 'Escolha um mês até 12 meses à frente';
+  if (months < -24) return 'Esse mês é antigo demais';
+  return null;
+}
+/** Este mês está liberado de taxa para a empresa? */
+export const isFreeMonth = (e: { freeMonths?: string[] | null }, period: string) => !!e.freeMonths?.includes(period);

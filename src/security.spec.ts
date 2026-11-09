@@ -74,14 +74,25 @@ describe('camada HTTP', () => {
 });
 
 describe('validateEnv', () => {
-  const good = { NODE_ENV: 'production', JWT_SECRET: 'x'.repeat(40), MONGO_URI: 'mongodb://h/db', CORS_ORIGIN: 'https://app.x.com', APP_URL: 'https://api.x.com', FRONTEND_URL: 'https://app.x.com', INFINITEPAY_HANDLE: 'tag', INFINITEPAY_WEBHOOK_SECRET: 'y'.repeat(32) } as NodeJS.ProcessEnv;
+  const good = { SECRETS_KEY: Buffer.alloc(32, 7).toString('base64'), R2_ACCOUNT_ID: 'f'.repeat(32), R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's', R2_BUCKET: 'balcao-arquivos', R2_PUBLIC_URL: 'https://arquivos.x.com', NODE_ENV: 'production', JWT_SECRET: 'x'.repeat(40), MONGO_URI: 'mongodb://h/db', CORS_ORIGIN: 'https://app.x.com', APP_URL: 'https://api.x.com', FRONTEND_URL: 'https://app.x.com', MP_ACCESS_TOKEN: 'APP_USR-123-abc', SMTP_URL: 'smtps://u:p@smtp.x.com' } as NodeJS.ProcessEnv;
   it('aceita config de produção completa', () => expect(() => validateEnv(good)).not.toThrow());
   it.each([
     ['JWT_SECRET', { JWT_SECRET: 'curto' }],
     ['CORS_ORIGIN', { CORS_ORIGIN: '' }],
     ['APP_URL', { APP_URL: 'http://api.x.com' }],
-    ['INFINITEPAY_HANDLE', { INFINITEPAY_HANDLE: '' }],
-    ['INFINITEPAY_WEBHOOK_SECRET', { INFINITEPAY_WEBHOOK_SECRET: 'curto' }],
+    ['MP_ACCESS_TOKEN', { MP_ACCESS_TOKEN: '' }],
+    ['MP_ACCESS_TOKEN', { MP_ACCESS_TOKEN: 'TEST-123' }],
+    ['SECRETS_KEY', { SECRETS_KEY: '' }], // sem ela, trocar o JWT_SECRET deixaria os dados criptografados ilegíveis
+    ['SECRETS_KEY', { SECRETS_KEY: Buffer.alloc(16).toString('base64') }],
+    ['TENANT_GUARD', { TENANT_GUARD: 'talvez' }],
+    ['SMTP_URL', { SMTP_URL: '' }], // sem e-mail ninguém recebe o código da verificação em duas etapas
+    ['GOOGLE_REDIRECT_URI', { GOOGLE_CLIENT_ID: 'a.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 's', GOOGLE_REDIRECT_URI: 'http://api.x.com/cb' }],
   ])('recusa produção sem %s válido', (name, patch) => expect(() => validateEnv({ ...good, ...patch })).toThrow(new RegExp(name)));
+  it('Google: as duas chaves juntas, client id do Google e volta do app só balcao:// ou exp://', () => {
+    expect(() => validateEnv({ ...good, GOOGLE_CLIENT_ID: 'a.apps.googleusercontent.com' })).toThrow(/juntos/);
+    expect(() => validateEnv({ ...good, GOOGLE_CLIENT_ID: 'qualquer', GOOGLE_CLIENT_SECRET: 's' })).toThrow(/googleusercontent/);
+    expect(() => validateEnv({ ...good, APP_GOOGLE_RETURN_URL: 'https://evil.com' })).toThrow(/APP_GOOGLE_RETURN_URL/);
+    expect(() => validateEnv({ ...good, GOOGLE_CLIENT_ID: 'a.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 's' })).not.toThrow();
+  });
   it('em desenvolvimento só exige JWT_SECRET e Mongo', () => expect(() => validateEnv({ JWT_SECRET: 'dev', MONGO_URI: 'm' } as any)).not.toThrow());
 });

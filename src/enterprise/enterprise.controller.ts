@@ -2,6 +2,7 @@ import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, Param, Put
 import { EnterpriseService } from './enterprise.service';
 import { EnterpriseUpdateDto } from './dto/enterprise.update.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
+import { PdvLayoutDto } from './dto/pdv-layout.dto';
 import { CurrentEnterprise } from '../common/decorators/current-enterprise.decorator';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
 
@@ -18,6 +19,19 @@ export class EnterpriseController {
   async findById(@Param('id', ParseMongoIdPipe) id: string, @CurrentEnterprise() current: string) {
     this.assertOwn(id, current);
     return this.enterpriseService.findEnterpriseById(id);
+  }
+
+  /** Layout da tela de vendas (o mesmo para web, app e colaboradores). Colaborador só lê. */
+  @Get(':id/pdv-layout')
+  async pdvLayout(@Param('id', ParseMongoIdPipe) id: string, @CurrentEnterprise() current: string) {
+    this.assertOwn(id, current);
+    return this.enterpriseService.getPdvLayout(id);
+  }
+
+  @Put(':id/pdv-layout')
+  async setPdvLayout(@Param('id', ParseMongoIdPipe) id: string, @Body() dto: PdvLayoutDto, @CurrentEnterprise() current: string) {
+    this.assertOwn(id, current);
+    return this.enterpriseService.setPdvLayout(id, dto.layout);
   }
 
   /** Trocar e-mail ou senha exige `currentPassword`. */

@@ -54,7 +54,7 @@ export class ProductController {
 
   @Get(':id')
   async getById(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) {
-    return this.one(eid, await this.productService.getProductById(eid, id));
+    return this.one(eid, (await this.productService.getFull(eid, id)) as never);
   }
 
   @Put(':id')

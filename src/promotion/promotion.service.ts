@@ -4,7 +4,7 @@ import { ClientSession, Model, QueryFilter, Types } from 'mongoose';
 import { Paginated } from '../common/dto/pagination-query.dto';
 import { toCents } from '../common/money';
 import { effectivePrice, ProductSchema } from '../products/schema/product.schema';
-import { PromotionCreateDto, PromotionListQueryDto, PromotionUpdateDto } from './dto/promotion.dto';
+import { PromotionCreateDto, PromotionGroupCreateDto, PromotionGroupUpdateDto, PromotionListQueryDto, PromotionUpdateDto } from './dto/promotion.dto';
 import { percentPrice, promoUnits, promotionStatus, remainingUnits } from './promotion.rules';
 import { Promotion, PromotionDocument } from './schema/promotion.schema';
 
@@ -48,7 +48,7 @@ export class PromotionService {
       id: String(o._id), productId: String(o.productId), productName: o.productName, productCode: o.productCode,
       name: o.name, mode: o.mode, percent: o.percent, promoPriceCents: o.promoPriceCents, regularPriceCents: o.regularPriceCents,
       limitUnits: o.limitUnits, soldUnits: o.soldUnits, remaining: remainingUnits(o),
-      startsAt: o.startsAt, endsAt: o.endsAt, endedAt: o.endedAt, status: promotionStatus(o),
+      startsAt: o.startsAt, endsAt: o.endsAt, endedAt: o.endedAt, status: promotionStatus(o), groupId: o.groupId ? String(o.groupId) : null,
       createdAt: (o as { createdAt?: Date }).createdAt,
     };
   }
@@ -74,6 +74,67 @@ export class PromotionService {
       startsAt, endsAt: dto.endsAt ?? null, endedAt: null,
     });
     return this.view(doc);
+  }
+
+  /**
+   * Promoção com vários produtos: um registro por produto (cada um com seu desconto e limite de unidades),
+   * todos com o mesmo groupId, nome e período. Tudo ou nada (transação).
+   */
+  async createGroup(enterpriseId: string, dto: PromotionGroupCreateDto) {
+    const ids = dto.items.map((i) => i.productId);
+    if (new Set(ids).size !== ids.length) throw new BadRequestException('O mesmo produto aparece duas vezes na promoção');
+    const products = await this.products.find({ _id: { $in: ids.map((x) => new Types.ObjectId(x)) }, enterpriseId });
+    if (products.length !== ids.length) throw new NotFoundException('Algum produto não foi encontrado');
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+    const now = new Date();
+    const startsAt = dto.startsAt && dto.startsAt > now ? dto.startsAt : now;
+    if (dto.endsAt && dto.endsAt <= startsAt) throw new BadRequestException('O fim da promoção precisa ser depois do início');
+    const groupId = new Types.ObjectId();
+    const docs: Record<string, unknown>[] = [];
+    for (const it of dto.items) {
+      const p = byId.get(it.productId)!;
+      const regular = toCents(p.price);
+      const current = toCents(effectivePrice(p));
+      const promoPriceCents = it.mode === 'percent' ? percentPrice(regular, it.percent!) : toCents(it.price!);
+      if (promoPriceCents <= 0) throw new BadRequestException(`${p.name}: o preço da promoção precisa ser maior que zero`);
+      if (promoPriceCents >= current) throw new BadRequestException(`${p.name}: o preço da promoção (${brl(promoPriceCents)}) precisa ser menor que o preço atual (${brl(current)})`);
+      if (await this.promos.exists(this.openFilter(enterpriseId, it.productId, now))) throw new ConflictException(`${p.name} já tem uma promoção ativa ou agendada. Tire da lista ou encerre a outra antes.`);
+      docs.push({
+        enterpriseId, productId: p._id, productName: p.name, productCode: p.code, name: dto.name.trim(), mode: it.mode,
+        percent: it.mode === 'percent' ? it.percent : null, promoPriceCents, regularPriceCents: regular, limitUnits: it.limitUnits ?? null,
+        soldUnits: 0, startsAt, endsAt: dto.endsAt ?? null, endedAt: null, groupId,
+      });
+    }
+    const session = await this.promos.db.startSession();
+    try {
+      let created: PromotionDocument[] = [];
+      await session.withTransaction(async () => { created = (await this.promos.insertMany(docs, { session })) as unknown as PromotionDocument[]; });
+      return { groupId: String(groupId), items: created.map((d) => this.view(d)) };
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  /** Nome e fim valem para todos os produtos do grupo que ainda estão abertos. */
+  async updateGroup(enterpriseId: string, groupId: string, dto: PromotionGroupUpdateDto) {
+    const items = await this.promos.find({ enterpriseId, groupId: new Types.ObjectId(groupId), endedAt: null });
+    if (!items.length) throw new NotFoundException('Promoção não encontrada ou já encerrada');
+    for (const p of items) {
+      if (dto.name !== undefined) p.name = dto.name.trim();
+      if (dto.endsAt !== undefined) {
+        if (dto.endsAt && dto.endsAt <= p.startsAt) throw new BadRequestException('O fim da promoção precisa ser depois do início');
+        p.endsAt = dto.endsAt;
+      }
+    }
+    await Promise.all(items.map((p) => p.save()));
+    return { items: items.map((p) => this.view(p)) };
+  }
+
+  /** Encerra todos os produtos do grupo na hora. */
+  async endGroup(enterpriseId: string, groupId: string) {
+    const r = await this.promos.updateMany({ enterpriseId, groupId: new Types.ObjectId(groupId), endedAt: null }, { $set: { endedAt: new Date() } });
+    if (!r.modifiedCount) throw new ConflictException('Promoção já encerrada');
+    return { ended: r.modifiedCount };
   }
 
   async list(enterpriseId: string, q: PromotionListQueryDto): Promise<Paginated<ReturnType<PromotionService['view']>>> {
@@ -125,6 +186,12 @@ export class PromotionService {
     const map = new Map<string, PromotionDocument>();
     for (const p of list) if (!map.has(String(p.productId))) map.set(String(p.productId), p);
     return map;
+  }
+
+  /** Produtos com promoção valendo agora (seção "Ofertas" da vitrine). */
+  async activeProductIds(enterpriseId: string): Promise<string[]> {
+    const ids = await this.promos.distinct('productId', this.activeFilter(enterpriseId));
+    return ids.map(String);
   }
 
   /** Acrescenta `promotion` aos produtos (lista, busca, mais vendidos, leitor). */

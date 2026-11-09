@@ -168,3 +168,21 @@ describe('guards', () => {
     expect(new JwtAuthGuard(new Reflector()).canActivate(ctx(Ctl.prototype.pub))).toBe(true);
   });
 });
+
+import { freeMonthProblem, isFreeMonth } from './billing.rules';
+describe('mês grátis (admin)', () => {
+  const now = new Date('2026-11-05T12:00:00Z');
+  it('aceita AAAA-MM até 12 meses à frente e até 24 para trás', () => {
+    expect(freeMonthProblem('2026-12', now)).toBeNull();
+    expect(freeMonthProblem('2027-11', now)).toBeNull();
+    expect(freeMonthProblem('2027-12', now)).toMatch(/12 meses/);
+    expect(freeMonthProblem('2024-10', now)).toMatch(/antigo/);
+    expect(freeMonthProblem('2026-13', now)).toMatch(/inválido/);
+    expect(freeMonthProblem('nov/26', now)).toMatch(/inválido/);
+  });
+  it('só o mês escolhido fica sem taxa', () => {
+    expect(isFreeMonth({ freeMonths: ['2026-11'] }, '2026-11')).toBe(true);
+    expect(isFreeMonth({ freeMonths: ['2026-11'] }, '2026-12')).toBe(false);
+    expect(isFreeMonth({}, '2026-11')).toBe(false);
+  });
+});

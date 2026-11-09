@@ -36,18 +36,36 @@ describe('cookie de sessão', () => {
     setSessionCookie(res, cfg({ COOKIE_SAMESITE: 'qualquer' }), 't', new Date());
     expect(res.cookie.mock.calls[1][2]).toMatchObject({ sameSite: 'lax', secure: false });
   });
-  it('login grava o cookie e NÃO devolve o token no corpo', async () => {
+  const exp = new Date(Date.now() + 3600_000);
+  const auth = { login: async () => ({ accessToken: 'SEGREDO', expiresAt: exp, enterprise: { id: '1', name: 'X', role: 'user' } }) } as any;
+  const user = { _id: '1', email: 'a@b.com', role: 'user', tokenVersion: 0 } as any;
+
+  it('login em aparelho confiável grava o cookie e NÃO devolve o token no corpo', async () => {
     const res = { cookie: jest.fn(), clearCookie: jest.fn() } as any;
-    const exp = new Date(Date.now() + 3600_000);
-    const auth = { login: async () => ({ accessToken: 'SEGREDO', expiresAt: exp, enterprise: { id: '1', name: 'X', role: 'user' } }) } as any;
-    const body = await new AuthController(auth, {} as any, cfg()).login({ user: {} }, {} as any, res);
+    const twoFactor = { isTrusted: jest.fn(() => true), start: jest.fn() } as any;
+    const body: any = await new AuthController(auth, {} as any, cfg(), {} as any, twoFactor).login({ user, headers: { cookie: 'erp_trusted=T' } } as any, {} as any, res);
+    expect(twoFactor.isTrusted).toHaveBeenCalledWith('T', expect.objectContaining({ _id: '1' }));
+    expect(twoFactor.start).not.toHaveBeenCalled();
     expect(res.cookie).toHaveBeenCalledWith(SESSION_COOKIE, 'SEGREDO', expect.objectContaining({ httpOnly: true, expires: exp }));
     expect(JSON.stringify(body)).not.toContain('SEGREDO');
     expect(body.enterprise).toMatchObject({ id: '1' });
   });
+  it('login sem aparelho confiável pede o código por e-mail e não abre sessão', async () => {
+    const res = { cookie: jest.fn() } as any;
+    const twoFactor = { isTrusted: jest.fn(() => false), start: jest.fn(async () => ({ challenge: 'c'.repeat(64), emailHint: 'a***@b.com', expiresIn: 600 })) } as any;
+    const body: any = await new AuthController(auth, {} as any, cfg(), {} as any, twoFactor).login({ user, headers: {} } as any, {} as any, res);
+    expect(twoFactor.start).toHaveBeenCalledWith(user, 'login', 'web');
+    expect(body).toEqual({ twoFactor: true, challenge: 'c'.repeat(64), emailHint: 'a***@b.com', expiresIn: 600 });
+    expect(res.cookie).not.toHaveBeenCalled();
+  });
+  it('admin sempre confirma com o código, mesmo em aparelho confiável', async () => {
+    const twoFactor = { isTrusted: jest.fn(() => true), start: jest.fn(async () => ({ challenge: 'c'.repeat(64), emailHint: '', expiresIn: 600 })) } as any;
+    const body: any = await new AuthController(auth, {} as any, cfg(), {} as any, twoFactor).login({ user: { ...user, role: 'admin' }, headers: { cookie: 'erp_trusted=T' } } as any, {} as any, { cookie: jest.fn() } as any);
+    expect(body.twoFactor).toBe(true);
+  });
   it('logout apaga o cookie', () => {
     const res = { clearCookie: jest.fn() } as any;
-    new AuthController({} as any, {} as any, cfg()).logout(res);
+    new AuthController({} as any, {} as any, cfg(), {} as any).logout(res);
     expect(res.clearCookie).toHaveBeenCalledWith(SESSION_COOKIE, expect.objectContaining({ httpOnly: true }));
   });
 });

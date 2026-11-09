@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, QueryFilter, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model, QueryFilter, Types } from 'mongoose';
 
 import { EnterpriseSchema } from '../enterprise/schema/enterprise.schema';
 import { EnterpriseService } from '../enterprise/enterprise.service';
@@ -16,9 +16,11 @@ import { SendMessageDto, SentQuery } from '../messages/messages.dto';
 import { TRIAL_DAYS } from '../billing/billing.constants';
 import { feeWaived, inTrial, trialDaysLeft, trialEnd } from '../billing/billing.rules';
 import { AuditLog } from './audit.schema';
+import { AdminTrustService } from './admin-trust.service';
 import { AuditQuery, EnterpriseListQuery, InvoiceListQuery, UpdateEnterpriseDto, UpdateSettingsDto } from './admin.dto';
 import { escapeRegex } from '../common/mongo';
 import { BILLING_TZ, periodOf } from '../common/period';
+import { crossTenant } from '../common/security/tenant-guard.plugin';
 
 const DAY = 24 * 3600_000;
 const oid = (s: string) => new Types.ObjectId(s);
@@ -38,7 +40,15 @@ export class AdminService {
     private readonly billing: BillingService,
     private readonly settings: SettingsService,
     private readonly messages: MessagesService,
-  ) {}
+    private readonly trust: AdminTrustService,
+    @InjectConnection() private readonly connection: Connection,
+  ) {
+    this.sales = crossTenant(sales, 'admin: só rotas @Roles(admin), enxerga todas as lojas');
+    this.products = crossTenant(products, 'admin: só rotas @Roles(admin), enxerga todas as lojas');
+    this.customers = crossTenant(customers, 'admin: só rotas @Roles(admin), enxerga todas as lojas');
+    this.fees = crossTenant(fees, 'admin: só rotas @Roles(admin), enxerga todas as lojas');
+    this.invoices = crossTenant(invoices, 'admin: só rotas @Roles(admin), enxerga todas as lojas');
+  }
 
   // ------------------------------------------------------------------ métricas
 
@@ -51,7 +61,7 @@ export class AdminService {
     const completed = { status: 'completed' as const };
     const sum = { $sum: 1 };
 
-    const [total, suspended, blocked, trial, new30, signupsByMonth, salesAgg, salesDaily, feeByMonth, unbilled, invAgg, paidMonth, topRaw] = await Promise.all([
+    const [total, suspended, blocked, trial, new30, signupsByMonth, salesAgg, salesDaily, feeByMonth, unbilled, invAgg, paidMonth, topRaw, stores] = await Promise.all([
       this.enterprises.countDocuments(tenants),
       this.enterprises.countDocuments({ ...tenants, status: 'suspended' }),
       this.enterprises.countDocuments({ ...tenants, 'billing.status': 'blocked' }),
@@ -89,6 +99,7 @@ export class AdminService {
         { $group: { _id: '$enterpriseId', count: sum, totalCents: { $sum: '$totalCents' } } },
         { $sort: { totalCents: -1 } }, { $limit: 10 },
       ]),
+      this.trust.storeSummary(),
     ]);
 
     const names = new Map((await this.enterprises.find({ _id: { $in: topRaw.map((t) => t._id) } }).select('name email')).map((e) => [String(e._id), e]));
@@ -106,6 +117,7 @@ export class AdminService {
         paidThisMonth: { count: paidMonth[0]?.count ?? 0, cents: paidMonth[0]?.cents ?? 0 },
         feeByMonth: feeByMonth.map((r) => ({ month: r._id, feeCents: r.feeCents, volumeCents: r.baseCents })),
       },
+      stores,
       topEnterprises30d: topRaw.map((t) => ({ id: String(t._id), name: names.get(String(t._id))?.name ?? '—', email: names.get(String(t._id))?.email ?? '', count: t.count, totalCents: t.totalCents })),
     };
   }
@@ -147,6 +159,7 @@ export class AdminService {
     ]);
     return {
       ...this.presentEnterprise(e, sales30[0]),
+      ...(await this.trust.enterpriseTrust(e)),
       usage: { products, customers, salesAllTime: salesAll[0] ?? { count: 0, totalCents: 0 } },
       invoices: invoices.map((i) => this.billing.present(i)),
       audit: audit.map((a) => this.presentAudit(a)),
@@ -219,6 +232,80 @@ export class AdminService {
     await this.log(actor, 'invoice.extend', String(inv.enterpriseId), { invoiceId: id, days, note });
     return this.billing.present(inv);
   }
+  /** Desconto numa fatura pendente: a dívida da empresa cai junto. */
+  async reduceInvoice(actor: Actor, id: string, amountCents: number, note: string) {
+    const { invoice, fromCents } = await this.billing.adminReduceInvoice(id, amountCents, note);
+    await this.log(actor, 'invoice.reduce', String(invoice.enterpriseId), { invoiceId: id, fromCents, toCents: amountCents, note });
+    return this.billing.present(invoice);
+  }
+
+  /** Mês grátis para a empresa (estorna o que já foi lançado e não pago naquele mês). */
+  async grantFreeMonth(actor: Actor, enterpriseId: string, period: string, note?: string) {
+    if (!(await this.enterprises.exists({ _id: enterpriseId, role: 'user' }))) throw new NotFoundException('Empresa não encontrada');
+    const r = await this.billing.adminGrantFreeMonth(enterpriseId, period);
+    await this.log(actor, 'enterprise.free_month', enterpriseId, { ...r, note });
+    return r;
+  }
+  async revokeFreeMonth(actor: Actor, enterpriseId: string, period: string) {
+    const r = await this.billing.adminRevokeFreeMonth(enterpriseId, period);
+    await this.log(actor, 'enterprise.free_month_revoke', enterpriseId, { period });
+    return r;
+  }
+
+  /**
+   * Visão de tudo: lojistas, colaboradores, clientes dos lojistas, produtos e marketplace.
+   * Só números agregados (nenhum dado pessoal de cliente ou comprador).
+   */
+  async overview() {
+    const now = new Date(); const d30 = new Date(now.getTime() - 30 * DAY);
+    const db = this.connection.db!;
+    const col = (n: string) => db.collection(n);
+    const tenants = (await this.enterprises.find({ role: 'user' }).select('_id').lean()).map((e) => e._id);
+    const inT = { enterpriseId: { $in: tenants } };
+    const count = (n: string, f: Record<string, unknown> = {}) => col(n).countDocuments(f);
+    const paidLike = ['paid', 'preparing', 'ready_for_pickup', 'shipped', 'delivered'];
+    const [
+      staffTotal, staffActive, staffWithSchedule, shiftsOpen, staffLogins30,
+      custTotal, cust30, custDebt, custOnline,
+      prodTotal, prodOnline, prodOut,
+      storesEnabled, storesListed, storesCashback, orders30, ordersStatus, shoppersTotal, shoppers30,
+      reviewsAgg, couponsLive, creditAgg, events30, reelsStores, bannersLive, promosLive,
+    ] = await Promise.all([
+      count('staff', inT), count('staff', { ...inT, active: true }), count('staff', { ...inT, 'schedule.0': { $exists: true } }),
+      count('staff_shifts', { ...inT, endedAt: null }), count('staff_access_logs', { ...inT, event: 'login', at: { $gte: d30 } }),
+      this.customers.countDocuments(inT), this.customers.countDocuments({ ...inT, createdAt: { $gte: d30 } }),
+      this.customers.aggregate<{ n: number; cents: number }>([{ $match: { ...inT, debitCents: { $gt: 0 } } }, { $group: { _id: null, n: { $sum: 1 }, cents: { $sum: '$debitCents' } } }]),
+      this.customers.countDocuments({ ...inT, shopperId: { $ne: null } }),
+      this.products.countDocuments(inT), this.products.countDocuments({ ...inT, showOnline: { $ne: false } }),
+      this.products.countDocuments({ ...inT, trackStock: { $ne: false }, quantity: { $lte: 0 } }),
+      count('stores', { enabled: true }), count('stores', { enabled: true, listed: true }), count('stores', { 'cashback.enabled': true }),
+      col('orders').aggregate<{ n: number; cents: number; market: number }>([{ $match: { status: { $in: paidLike }, 'payment.paidAt': { $gte: d30 } } }, { $group: { _id: null, n: { $sum: 1 }, cents: { $sum: '$totalCents' }, market: { $sum: { $cond: [{ $eq: ['$source', 'directory'] }, 1, 0] } } } }]).toArray(),
+      col('orders').aggregate<{ _id: string; n: number }>([{ $match: { createdAt: { $gte: d30 } } }, { $group: { _id: '$status', n: { $sum: 1 } } }]).toArray(),
+      count('shoppers'), count('shoppers', { createdAt: { $gte: d30 } }),
+      col('reviews').aggregate<{ n: number; avg: number; photos: number }>([{ $match: { hidden: false } }, { $group: { _id: null, n: { $sum: 1 }, avg: { $avg: '$rating' }, photos: { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ['$photos', []] } }, 0] }, 1, 0] } } } }]).toArray(),
+      count('coupons', { active: true, $or: [{ endsAt: null }, { endsAt: { $gt: now } }] }),
+      col('store_credits').aggregate<{ cents: number }>([{ $match: { kind: 'earn', status: 'active', remainingCents: { $gt: 0 }, expiresAt: { $gt: now } } }, { $group: { _id: null, cents: { $sum: '$remainingCents' } } }]).toArray(),
+      col('product_events').aggregate<{ _id: string; n: number }>([{ $match: { at: { $gte: d30 } } }, { $group: { _id: '$kind', n: { $sum: 1 } } }]).toArray(),
+      count('stores', { 'reels.0': { $exists: true } }),
+      count('market_banners', { active: true, $or: [{ endsAt: null }, { endsAt: { $gt: now } }] }),
+      count('promotions', { ...inT, endedAt: null, startsAt: { $lte: now }, $or: [{ endsAt: null }, { endsAt: { $gt: now } }] }),
+    ]);
+    const o = orders30[0]; const r = reviewsAgg[0]; const ev = Object.fromEntries(events30.map((e) => [e._id, e.n]));
+    return {
+      staff: { total: staffTotal, active: staffActive, withSchedule: staffWithSchedule, shiftsOpen, logins30d: staffLogins30 },
+      customers: { total: custTotal, new30d: cust30, withDebt: custDebt[0]?.n ?? 0, debtCents: custDebt[0]?.cents ?? 0, fromOnline: custOnline },
+      products: { total: prodTotal, online: prodOnline, outOfStock: prodOut, promotionsLive: promosLive },
+      marketplace: {
+        storesEnabled, storesListed, storesWithCashback: storesCashback, storesWithVideos: reelsStores, bannersLive,
+        orders30d: { paid: o?.n ?? 0, paidCents: o?.cents ?? 0, fromMarketplace: o?.market ?? 0, byStatus: Object.fromEntries(ordersStatus.map((x) => [x._id, x.n])) },
+        shoppers: { total: shoppersTotal, new30d: shoppers30 },
+        reviews: { total: r?.n ?? 0, avg: r?.avg ? Math.round(r.avg * 10) / 10 : 0, withPhotos: r?.photos ?? 0 },
+        couponsLive, cashbackOutstandingCents: creditAgg[0]?.cents ?? 0,
+        events30d: { views: ev.view ?? 0, likes: ev.like ?? 0 },
+      },
+    };
+  }
+
   async runClose(actor: Actor) {
     await this.billing.runDailyClose();
     await this.log(actor, 'billing.run_close', null, {});
@@ -262,6 +349,9 @@ export class AdminService {
     return { items: rows.map((a) => this.presentAudit(a)), total, page: q.page, limit: q.limit };
   }
 
+  /** Registro na auditoria para ações de admin feitas fora deste serviço (ex.: banners do marketplace). */
+  record(actor: Actor, action: string, meta: Record<string, unknown>) { return this.log(actor, action, null, meta); }
+
   private async log(actor: Actor, action: string, target: string | null, meta: Record<string, unknown>) {
     await this.audit.create({ actorId: oid(actor.id), actorEmail: actor.email, action, targetEnterpriseId: target ? oid(target) : null, meta });
   }
@@ -274,7 +364,7 @@ export class AdminService {
     return {
       id: String(e._id), name: e.name, email: e.email, cnpj: e.cnpj ?? '', createdAt: t.createdAt, lastLoginAt: e.lastLoginAt ?? null,
       status: e.status, suspendedReason: e.suspendedReason ?? null, suspendedAt: e.suspendedAt ?? null,
-      billingStatus: e.billing?.status ?? 'active', debtCents: e.debtCents ?? 0, feeExempt: !!e.feeExempt, feeCapCents: e.feeCapCents ?? null,
+      billingStatus: e.billing?.status ?? 'active', debtCents: e.debtCents ?? 0, feeExempt: !!e.feeExempt, feeCapCents: e.feeCapCents ?? null, freeMonths: (e as unknown as { freeMonths?: string[] }).freeMonths ?? [],
       /** Por que não paga taxa agora ('admin' | 'exempt' | 'trial'), ou null = está pagando. */
       feeWaivedReason: feeWaived({ ...t, role: e.role, feeExempt: e.feeExempt }),
       trial: { active: inTrial(t), endsAt: trialEnd(t), daysLeft: trialDaysLeft(t) },

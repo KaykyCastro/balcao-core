@@ -1,3 +1,4 @@
+import { LEGAL_VERSIONS } from '../common/legal-versions';
 import { ForbiddenException, HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -28,14 +29,23 @@ export class AuthService {
     @InjectModel(AuthHandoff.name) private readonly handoffs: Model<AuthHandoff>,
   ) {}
 
-  async register(dto: RegisterDto) {
-    const enterprise = await this.enterpriseService.create(dto, this.terms(dto)); // lança 409 se já existir
-    return this.login(enterprise);
+  /** Cadastro (site e app): cria a conta; a sessão só abre depois do código que confirma o e-mail. Lança 409 se já existir. */
+  createAccount(dto: RegisterDto): Promise<EnterpriseDocument> {
+    return this.enterpriseService.create(dto, this.terms(dto));
   }
 
-  /** Versão aceita: a enviada pelo cliente ou a atual do servidor (TERMS_VERSION). */
-  private terms(dto: RegisterDto) {
-    return { version: dto.termsVersion ?? this.config.get<string>('TERMS_VERSION') ?? '2026-10-30' };
+  /** Cadastro pelo Google: e-mail e identidade vêm do Google (já confirmados); a pessoa informa a empresa e aceita os termos. */
+  createGoogleAccount(p: { sub: string; email: string }, dto: { name: string; cnpj?: string; termsVersion?: string; privacyVersion?: string }): Promise<EnterpriseDocument> {
+    return this.enterpriseService.createWithGoogle({ name: dto.name.trim(), email: p.email, googleId: p.sub, cnpj: dto.cnpj }, this.terms(dto));
+  }
+
+  /**
+   * Versão aceita no cadastro: sempre a vigente (common/legal-versions.ts). Os links do cadastro, no site e no app, abrem
+   * os textos atuais, então é ela que foi aceita; a data mandada pelo cliente não vale como prova (o app chegou a mandar
+   * uma que nunca existiu).
+   */
+  private terms(_dto?: { termsVersion?: string; privacyVersion?: string }) {
+    return { version: LEGAL_VERSIONS.terms, privacyVersion: LEGAL_VERSIONS.privacy };
   }
 
   /**
@@ -72,17 +82,20 @@ export class AuthService {
     return { accessToken, expiresAt, enterprise: { id: String(_id), ...safe } };
   }
 
+  /** Login do funcionário: mesma sessão da empresa, marcada com o funcionário (st) e a versão do login dele (stv). */
+  loginStaff(r: { enterpriseId: string; enterpriseTv: number; staff: { _id: unknown; tokenVersion?: number; name: string; role: string; permissions: string[] } }, opts: { expiresIn?: string } = {}) {
+    const payload = { sub: r.enterpriseId, tv: r.enterpriseTv, st: String(r.staff._id), stv: r.staff.tokenVersion ?? 0 };
+    const accessToken = opts.expiresIn ? this.jwtService.sign(payload, { expiresIn: opts.expiresIn as any }) : this.jwtService.sign(payload);
+    const exp = (this.jwtService.decode(accessToken) as { exp?: number } | null)?.exp;
+    return { accessToken, expiresAt: new Date(exp ? exp * 1000 : Date.now() + 8 * 3600_000) };
+  }
+
   /**
    * App do celular: o token vai no corpo (o app guarda no armazenamento seguro do aparelho) e dura mais
    * (JWT_MOBILE_EXPIRES_IN, padrão 30 dias). "Sair de todos os dispositivos" e troca de senha continuam derrubando.
    */
   loginMobile(enterprise: EnterpriseDocument) {
     return this.login(enterprise, { expiresIn: this.config.get<string>('JWT_MOBILE_EXPIRES_IN') ?? '30d' });
-  }
-
-  async registerMobile(dto: RegisterDto) {
-    const enterprise = await this.enterpriseService.create(dto, this.terms(dto));
-    return this.loginMobile(enterprise);
   }
 
   /** Cria um código de uso único (vale 60 s) para abrir uma tela do Balcão já logado no navegador do app. */

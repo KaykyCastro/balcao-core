@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { IsIn, IsMongoId, IsOptional } from 'class-validator';
 import { SaleService } from './sale.service';
 import { SaleCreateDto } from './dto/sale-create.dto';
@@ -20,9 +20,9 @@ export class SaleController {
 
   /** Envie `Idempotency-Key` (8 a 64 caracteres) para poder repetir o pedido sem vender duas vezes. */
   @Post()
-  create(@CurrentEnterprise() eid: string, @Body() dto: SaleCreateDto, @Headers('idempotency-key') key?: string) {
+  create(@CurrentEnterprise() eid: string, @Body() dto: SaleCreateDto, @Req() req: { user: { staff?: { id: string; name: string } } }, @Headers('idempotency-key') key?: string) {
     if (key !== undefined && !/^[A-Za-z0-9_-]{8,64}$/.test(key)) throw new BadRequestException('Idempotency-Key inválida');
-    return this.saleService.create(eid, dto, key);
+    return this.saleService.create(eid, dto, key, undefined, req.user.staff ? { id: req.user.staff.id, name: req.user.staff.name } : null);
   }
 
   @Get()

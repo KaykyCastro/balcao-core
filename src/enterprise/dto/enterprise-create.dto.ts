@@ -2,7 +2,7 @@ import { Transform } from 'class-transformer';
 import { IsEmail, IsNotEmpty, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 
 /** Logo: data URL de imagem (PNG/JPEG/WebP) ou https. SVG fica de fora (pode carregar script). */
-export const LOGO_RE = /^(data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+|https:\/\/[^\s"'<>]+)$/;
+export const LOGO_RE = /^(data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+|https?:\/\/[^\s"'<>]+)$/; // URL do R2 (ou http da pasta local em desenvolvimento)
 export const PASSWORD_MSG = 'A senha precisa ter de 8 a 72 caracteres';
 
 export class EnterpriseCreateDto {

@@ -5,7 +5,7 @@ const mk = (updated: any, found: any) => {
     findOneAndUpdate: jest.fn().mockResolvedValue(updated),
     findOne: jest.fn().mockReturnValue({ select: () => ({ session: () => Promise.resolve(found) }) }),
   };
-  return { svc: new ProductService(model, {} as any), model };
+  return { svc: new ProductService(model, {} as any, {} as any), model };
 };
 
 describe('estoque', () => {

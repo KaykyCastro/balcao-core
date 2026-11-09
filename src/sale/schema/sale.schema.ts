@@ -50,12 +50,26 @@ export class Sale {
   @Prop({ type: String, enum: ['cash', 'pix', 'card', 'other', 'fiado', 'online'], required: true })
   paymentMethod: PaymentMethod;
 
-  /** 'online' = pedido pago na loja online (InfinitePay do lojista). Ausente = balcão. */
+  /** 'online' = pedido pago na loja online (Mercado Pago do lojista). Ausente = balcão. */
   @Prop({ type: String, enum: ['pos', 'online'], default: 'pos' })
   channel?: 'pos' | 'online';
 
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Order', default: undefined })
   orderId?: Types.ObjectId;
+
+  /** Quem vendeu (funcionário logado). Ausente = o dono. */
+  @Prop(raw({ id: { type: MongooseSchema.Types.ObjectId }, name: String, _id: false }))
+  staff?: { id: Types.ObjectId; name: string } | null;
+
+  /** Comanda de mesa fechada (restaurante): mesa e taxa de serviço (já somada no total). */
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Tab', default: undefined })
+  tabId?: Types.ObjectId;
+
+  @Prop(raw({ table: Number, number: Number, name: String, label: String, _id: false }))
+  tab?: { table: number; number: number; name: string; label: string } | null;
+
+  @Prop({ type: Number, default: 0, min: 0 })
+  serviceCents?: number;
 
   @Prop({ type: String, enum: ['completed', 'cancelled'], default: 'completed', index: true })
   status: 'completed' | 'cancelled';
@@ -66,6 +80,17 @@ export class Sale {
   @Prop({ required: true, min: 0 })
   totalCents: number;
 
+  /** Soma dos itens antes do desconto do carrinho (ausente em vendas antigas: igual ao total). */
+  @Prop({ type: Number, min: 0, default: undefined })
+  subtotalCents?: number;
+
+  /** Desconto dado no carrinho (já abatido do total). */
+  @Prop({ type: Number, min: 0, default: 0 })
+  discountCents?: number;
+
+  @Prop(raw({ mode: String, value: Number, reason: String, _id: false }))
+  discount?: { mode: 'percent' | 'amount'; value: number; reason?: string } | null;
+
   /** Dinheiro: valor entregue pelo cliente (centavos). null quando não informado ou outra forma de pagamento. */
   @Prop({ type: Number, default: null, min: 0 })
   cashReceivedCents: number | null;
@@ -73,6 +98,13 @@ export class Sale {
   /** Dinheiro: troco devolvido (centavos), calculado pela API. */
   @Prop({ type: Number, default: null, min: 0 })
   changeCents: number | null;
+
+  /** Cobrança eletrônica no balcão (maquininha ou Pix): quem processou e o comprovante. Ausente = registrada à mão. */
+  @Prop(raw({
+    provider: String, method: String, installments: Number, amountCents: Number, reference: String, paymentId: String,
+    brand: String, paidAt: Date, intentId: { type: MongooseSchema.Types.ObjectId },
+  }))
+  payment?: { provider: string; method: string; installments?: number; amountCents: number; reference?: string; paymentId?: string; brand?: string; paidAt?: Date; intentId?: Types.ObjectId } | null;
 
   /** Taxa do ERP cobrada nesta venda (0,5%, limitada pelo teto). */
   @Prop({ required: true, min: 0, default: 0 })

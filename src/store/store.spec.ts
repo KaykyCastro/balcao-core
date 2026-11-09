@@ -1,12 +1,15 @@
 import { Types } from 'mongoose';
-import { baseShippingOptions, canCancel, canMove, carrierOption, inCepRanges, itemDims, slugify, slugProblem, trackingUrlFor } from './store.rules';
+import { baseShippingOptions, canCancel, canMove, carrierOption, inCepRanges, itemDims, modeOf, slugify, slugProblem, trackingUrlFor } from './store.rules';
 import { parseQuotes } from './melhor-envio.client';
-import { open, seal } from './secret-box';
+import { open, seal } from '../common/secret-box';
 import { OrderService } from './order.service';
 import { StoreService } from './store.service';
+import { parseRange, sniffVideo } from './media.service';
+import { StoreUpdateDto } from './dto/store.dto';
+import { onlineEffectivePrice } from '../products/schema/product.schema';
 import { BillingService, onlineFeeCents } from '../billing/billing.service';
-import { MercadoPagoClient } from './mercadopago.client';
-import { sign } from './secret-box';
+import { MercadoPagoClient } from '../mercadopago/mercadopago.client';
+import { sign } from '../common/secret-box';
 
 describe('loja online: regras', () => {
   it('endereço da loja', () => {
@@ -129,7 +132,7 @@ function setup(over: { linkFails?: boolean; refundFails?: boolean; promo?: { pri
     quote: jest.fn(async (_s, cep) => [{ id: 'pickup', kind: 'pickup', name: 'Retirar na loja', priceCents: 0, etaText: '' }, ...(cep ? [{ id: 'fixed', kind: 'fixed', name: 'Envio padrão', priceCents: 2500, etaText: '3 a 8 dias úteis' }] : [])]),
     nextOrderNumber: jest.fn(async () => 1001), getOrCreate: jest.fn(async () => store), mpAccessToken: jest.fn(async () => 'APP_USR-seller'),
   };
-  const sales: any = { recordOnlineSale: jest.fn(async (_e, p) => ({ _id: new Types.ObjectId(), feeCents: p.collectedFeeCents })), cancel: jest.fn(async () => ({})) };
+  const sales: any = { recordOnlineSale: jest.fn(async (_e, p) => ({ _id: new Types.ObjectId(), feeCents: p.collectedFeeCents })), recordCodSale: jest.fn(async () => ({ _id: new Types.ObjectId(), feeCents: 150 })), cancel: jest.fn(async () => ({})) };
   const payments = new Map<string, any>();
   const mp: any = {
     createPreference: jest.fn(async () => { if (over.linkFails) throw new Error('Mercado Pago fora'); return { id: 'pref-1', initPoint: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1' }; }),
@@ -141,17 +144,22 @@ function setup(over: { linkFails?: boolean; refundFails?: boolean; promo?: { pri
   const config: any = { get: (k: string) => ({ APP_URL: 'https://api.balcao.app', FRONTEND_URL: 'https://balcao.app' } as Record<string, string>)[k] };
   const enterprises: any = { findEnterpriseById: jest.fn(async () => ({ email: 'dono@bella.com', createdAt: new Date('2020-01-01'), trialEndsAt: over.trial ? new Date(Date.now() + 86_400_000) : new Date('2020-02-01') })) };
   const billing: any = { onlineRate: jest.fn(async (src: string) => (src === 'directory' ? 300 : 150)), reverseCollectedFee: jest.fn(async () => undefined) };
-  const svc = new OrderService(orders, connection, stores, products, promotions, sales, mp, mail, config, enterprises, billing);
+  const customers: any = { ensureForShopper: jest.fn(async () => ({ _id: new Types.ObjectId() })) };
+  const shoppers: any = { rememberCheckout: jest.fn(async () => undefined) };
+  // Sem cupom nem cashback nestes testes (o fluxo deles tem testes próprios em rewards.spec.ts).
+  const rewards: any = { releaseCoupon: async () => undefined, restoreCredit: async () => undefined, reverseEarn: async () => undefined, earn: async () => undefined, respendIfNeeded: async () => undefined, cashbackOf: async () => null, balance: async () => 0 };
+  const svc = new OrderService(orders, connection, stores, products, promotions, sales, mp, mail, config, enterprises, billing, customers, shoppers, rewards);
   /** Simula um pagamento no Mercado Pago para o pedido. */
   const pay = (orderId: string, o: Partial<{ status: string; amountCents: number; feeCents: number; collector: string; ref: string }> = {}) => {
     const id = String(900000 + payments.size);
     payments.set(id, { id, status: o.status ?? 'approved', statusDetail: '', externalReference: o.ref ?? orderId, amountCents: o.amountCents ?? docs.get(orderId).totalCents, collectorId: o.collector ?? '555', marketplaceFeeCents: o.feeCents ?? docs.get(orderId).feeCents, method: 'pix', approvedAt: null });
     return id;
   };
-  return { svc, docs, orders, stock, products, promotions, stores, sales, mp, mail, store, billing, pay, payments };
+  return { svc, customers, shoppers, docs, orders, stock, products, promotions, stores, sales, mp, mail, store, billing, pay, payments };
 }
 
 const customer = { name: 'Ana Souza', email: 'ana@ex.com', phone: '85999990000' };
+const ET = (() => { const exp = Date.now() + 3600_000; return `${exp}.${sign('checkout-email', `ana@ex.com.${exp}`)}`; })();
 const address = { cep: '60165121', street: 'Rua A', number: '10', district: 'Meireles', city: 'Fortaleza', state: 'ce' };
 
 const hook = (oid: string, payId: string, s?: string) => ({ q: { o: oid, s: s ?? sign('store-order', oid), type: 'payment', 'data.id': payId }, body: { type: 'payment', data: { id: payId } } });
@@ -159,7 +167,7 @@ const hook = (oid: string, payId: string, s?: string) => ({ q: { o: oid, s: s ??
 describe('pedido online (Mercado Pago com comissão automática)', () => {
   it('checkout: reserva estoque, recalcula o frete e cria o pagamento na conta do lojista com a comissão', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 2 }, { productId: String(prodB._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 2 }, { productId: String(prodB._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed' });
     expect(r).toMatchObject({ number: 1001, totalCents: 37980 + 14990 + 2500, checkoutUrl: expect.stringContaining('mercadopago.com.br') });
     expect(t.stock.get(String(prodA._id))).toBe(3);
     const pref = t.mp.createPreference.mock.calls[0][0];
@@ -179,38 +187,38 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
 
   it('loja sem Mercado Pago conectado não vende', async () => {
     const t = setup(); t.store.mp = { userId: '' };
-    await expect(t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' })).rejects.toMatchObject({ status: 409 });
+    await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' })).rejects.toMatchObject({ status: 409 });
   });
 
   it('checkout: opção de frete que não existe para o CEP é recusada', async () => {
     const t = setup();
-    await expect(t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'fixed' })).rejects.toMatchObject({ status: 422 });
+    await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'fixed' })).rejects.toMatchObject({ status: 422 });
     expect(t.products.decreaseQuantity).not.toHaveBeenCalled();
   });
 
   it('checkout: promoção com limite divide a linha (2 no promo + 1 no normal)', async () => {
     const t = setup({ promo: { priceCents: 15000, grant: 2 } });
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 3 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 3 }], customer, shippingOptionId: 'pickup' });
     expect(r.totalCents).toBe(2 * 15000 + 18990);
     expect(t.docs.get(r.orderId).address).toBeNull();
   });
 
   it('checkout: sem estoque não cria pedido', async () => {
     const t = setup();
-    await expect(t.svc.checkout('bella-moda', { items: [{ productId: String(prodB._id), quantity: 3 }], customer, shippingOptionId: 'pickup' })).rejects.toMatchObject({ status: 409 });
+    await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodB._id), quantity: 3 }], customer, shippingOptionId: 'pickup' })).rejects.toMatchObject({ status: 409 });
     expect(t.orders.create).not.toHaveBeenCalled();
   });
 
   it('checkout: Mercado Pago falhou → estoque devolvido e pedido cancelado', async () => {
     const t = setup({ linkFails: true });
-    await expect(t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 2 }], customer, shippingOptionId: 'pickup' })).rejects.toThrow('Mercado Pago fora');
+    await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 2 }], customer, shippingOptionId: 'pickup' })).rejects.toThrow('Mercado Pago fora');
     expect(t.stock.get(String(prodA._id))).toBe(5);
     expect([...t.docs.values()][0].status).toBe('cancelled');
   });
 
   it('webhook: token errado é recusado; certo consulta o pagamento e vira venda com a comissão já recebida', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     const pid = t.pay(r.orderId);
     await expect(t.svc.webhook(hook(r.orderId, pid, 'errado').q, {}, {})).rejects.toMatchObject({ status: 401 });
     const h = hook(r.orderId, pid);
@@ -224,7 +232,7 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
 
   it('pagamento de outro pedido, de outra conta ou com valor menor não baixa', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     for (const [o, out] of [[{ ref: 'outro' }, 'not_this_order'], [{ collector: '999' }, 'wrong_account'], [{ amountCents: 100 }, 'amount_mismatch'], [{ status: 'pending' }, 'pending']] as const) {
       const h = hook(r.orderId, t.pay(r.orderId, o));
       expect((await t.svc.webhook(h.q, h.body, {})).outcome).toBe(out);
@@ -234,7 +242,7 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
 
   it('volta do checkout confirma pelo payment_id; acompanhamento exige o token', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     await expect(t.svc.publicView('bella-moda', r.orderId, 'x'.repeat(32))).rejects.toMatchObject({ status: 404 });
     const c = await t.svc.confirmFromRedirect('bella-moda', r.orderId, { t: r.token, paymentId: t.pay(r.orderId) });
     expect(c.outcome).toBe('applied');
@@ -245,7 +253,7 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
 
   it('expira sem pagamento: devolve estoque; pago depois, reserva de novo (ou avisa se faltou)', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodB._id), quantity: 2 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodB._id), quantity: 2 }], customer, shippingOptionId: 'pickup' });
     expect(t.stock.get(String(prodB._id))).toBe(0);
     t.orders.find = () => ({ select: () => ({ limit: () => ({ lean: async () => [{ _id: new Types.ObjectId(r.orderId) }] }) }) });
     expect(await t.svc.expireStale(new Date(Date.now() + 2 * 3600_000))).toBe(1);
@@ -257,7 +265,7 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
 
   it('lojista: status, envio e cancelamento de pedido pago devolve o dinheiro pelo Mercado Pago', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed' });
     await t.svc.confirmFromRedirect('bella-moda', r.orderId, { t: r.token, paymentId: t.pay(r.orderId) });
     await expect(t.svc.setStatus(String(eid), r.orderId, { status: 'ready_for_pickup' })).rejects.toMatchObject({ status: 409 });
     const shipped = await t.svc.setStatus(String(eid), r.orderId, { status: 'shipped', trackingCode: 'qb123456789br' });
@@ -271,14 +279,14 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
 
   it('estorno automático falhou: cancela e avisa para devolver na mão', async () => {
     const t = setup({ refundFails: true });
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     await t.svc.confirmFromRedirect('bella-moda', r.orderId, { t: r.token, paymentId: t.pay(r.orderId) });
     expect(await t.svc.cancel(String(eid), r.orderId, { reason: 'Sem estoque' })).toMatchObject({ status: 'cancelled', refundNeeded: true });
   });
 
   it('devolvido direto no Mercado Pago (ou chargeback): o webhook cancela o pedido e desfaz a venda', async () => {
     const t = setup();
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     const pid = t.pay(r.orderId);
     await t.svc.confirmFromRedirect('bella-moda', r.orderId, { t: r.token, paymentId: pid });
     t.payments.get(pid).status = 'refunded';
@@ -289,19 +297,79 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
   });
 });
 
+describe('pagar na entrega (cardápio e loja virtual)', () => {
+  const cod = (t: ReturnType<typeof setup>, method: 'cash' | 'card' | 'pix' = 'cash') => t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup', payOnDelivery: { method, changeForCents: 10000 } } as any);
+  it('só quando a loja aceita, e nunca no e-commerce', async () => {
+    const t = setup();
+    await expect(cod(t)).rejects.toThrow(/não aceita/);
+    Object.assign(t.store, { mode: 'ecommerce', payOnDelivery: { enabled: true, methods: ['cash'] } });
+    await expect(cod(t)).rejects.toThrow(/não aceita/);
+    Object.assign(t.store, { mode: 'menu' });
+    await expect(cod(t, 'card')).rejects.toThrow(/não aceita/);
+  });
+  it('confirma sem Mercado Pago, reserva o estoque, e vira venda quando a loja registra o recebimento', async () => {
+    const t = setup();
+    Object.assign(t.store, { mode: 'menu', payOnDelivery: { enabled: true, methods: ['cash', 'card', 'pix'] } });
+    const r = await cod(t);
+    expect(r.checkoutUrl).toBeNull();
+    expect(t.mp.createPreference).not.toHaveBeenCalled();
+    const o = t.docs.get(r.orderId);
+    expect(o).toMatchObject({ status: 'confirmed', payment: { mode: 'on_delivery', onDelivery: { method: 'cash', changeForCents: 10000 } } });
+    expect(t.stock.get(String(prodA._id))).toBe(prodA.quantity - 1);
+    await expect(t.svc.setStatus(String(eid), r.orderId, { status: 'delivered' } as any)).rejects.toThrow(/Entregue e pago/);
+    const done = await t.svc.collect(String(eid), r.orderId, { method: 'cash', cashReceivedCents: 10000 });
+    expect(done.status).toBe('delivered');
+    expect(t.sales.recordCodSale).toHaveBeenCalledWith(String(eid), expect.objectContaining({ paymentMethod: 'cash', cashReceivedCents: 10000, rateBps: 150 }), expect.anything());
+    await expect(t.svc.collect(String(eid), r.orderId, { method: 'cash' })).rejects.toThrow(/já registrado/);
+  });
+  it('cancelar antes de receber só devolve o estoque (sem estorno)', async () => {
+    const t = setup();
+    Object.assign(t.store, { mode: 'catalog', payOnDelivery: { enabled: true, methods: ['pix'] } });
+    const r = await cod(t, 'pix');
+    await t.svc.cancel(String(eid), r.orderId, { reason: 'cliente desistiu' });
+    expect(t.docs.get(r.orderId).status).toBe('cancelled');
+    expect(t.stock.get(String(prodA._id))).toBe(prodA.quantity);
+    expect(t.mp.refund).not.toHaveBeenCalled();
+  });
+});
+
+describe('comprador logado', () => {
+  it('checkout logado: vira cliente da loja, pedido e venda ficam ligados ao cadastro e à conta', async () => {
+    const t = setup();
+    const shopper: any = { _id: new Types.ObjectId(), name: 'Ana Souza', email: 'ana@ex.com', phone: '', addresses: [] };
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed' }, shopper);
+    expect(t.customers.ensureForShopper).toHaveBeenCalledWith(String(eid), expect.objectContaining({ _id: shopper._id, email: 'ana@ex.com', phone: '85999990000' }), expect.stringContaining('Rua A, 10'), expect.anything());
+    const doc = t.docs.get(r.orderId);
+    expect(String(doc.shopperId)).toBe(String(shopper._id));
+    expect(doc.customerId).toBeTruthy();
+    expect(t.shoppers.rememberCheckout).toHaveBeenCalled();
+    const pid = t.pay(r.orderId);
+    const h = hook(r.orderId, pid);
+    await t.svc.webhook(h.q, h.body, {});
+    expect(t.sales.recordOnlineSale).toHaveBeenCalledWith(String(eid), expect.objectContaining({ customerId: doc.customerId }), expect.anything());
+  });
+
+  it('visitante continua comprando sem conta (sem cadastro automático)', async () => {
+    const t = setup();
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    expect(t.customers.ensureForShopper).not.toHaveBeenCalled();
+    expect(t.docs.get(r.orderId).shopperId).toBeNull();
+  });
+});
+
 describe('taxa da loja online', () => {
   it('cliente vindo da página "Lojas no Balcão" paga 3%; link da loja 1,5%; frete fica de fora', async () => {
     const t = setup();
-    const a = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed', source: 'directory' });
+    const a = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, address, shippingOptionId: 'fixed', source: 'directory' });
     expect(t.docs.get(a.orderId)).toMatchObject({ source: 'directory', feeRateBps: 300, feeCents: 570, feeCharged: false });
     expect(t.mp.createPreference.mock.calls[0][0].marketplaceFeeCents).toBe(570);
-    const b = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const b = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     expect(t.docs.get(b.orderId)).toMatchObject({ source: 'store', feeRateBps: 150, feeCents: 285 });
     expect((t.svc.present(t.docs.get(a.orderId)) as any).fee).toEqual({ source: 'directory', rateBps: 300, cents: 570, charged: false });
   });
   it('no teste grátis a comissão é zero', async () => {
     const t = setup({ trial: true });
-    const r = await t.svc.checkout('bella-moda', { items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
     expect(t.docs.get(r.orderId).feeCents).toBe(0);
     expect(t.mp.createPreference.mock.calls[0][0].marketplaceFeeCents).toBe(0);
   });
@@ -327,10 +395,10 @@ describe('Mercado Pago: assinatura do webhook e conexão', () => {
   });
   it('state do OAuth é amarrado à empresa e expira', async () => {
     const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', mp: {}, shipping: {}, toJSON() { return { ...this }; } };
-    const stores: any = { findOne: jest.fn(async () => doc), updateOne: jest.fn(async (_q, u) => Object.assign(doc, u.$set)), findById: () => ({ select: () => ({ lean: async () => ({ shipping: {} }) }) }) };
+    const stores: any = { findOne: jest.fn(() => Object.assign(Promise.resolve(doc), { select: () => ({ lean: async () => ({ shipping: {} }) }) })), updateOne: jest.fn(async (_q, u) => Object.assign(doc, u.$set)), findById: () => ({ select: () => ({ lean: async () => ({ shipping: {} }) }) }) };
     const mp: any = { authUrl: (st: string) => `https://auth.mercadopago.com.br/authorization?state=${st}`, exchangeCode: jest.fn(async () => ({ accessToken: 'AT', refreshToken: 'RT', userId: '555', publicKey: 'PK', expiresAt: new Date(Date.now() + 1e10) })), me: async () => ({ id: '555', nickname: 'BELLAMODA', email: 'b@b.com' }) };
     const settings: any = { policy: async () => ({ onlineRateBps: 150, directoryRateBps: 300 }) };
-    const svc = new StoreService(stores, { findEnterpriseById: async () => ({}) } as any, {} as any, {} as any, {} as any, settings, mp);
+    const svc = new StoreService(stores, { findEnterpriseById: async () => ({}) } as any, {} as any, {} as any, {} as any, settings, mp, {} as any);
     const { url } = await svc.mpConnectUrl(String(eid));
     const state = new URL(url).searchParams.get('state')!;
     await expect(svc.mpCallback(new Types.ObjectId().toHexString(), 'code', state)).rejects.toMatchObject({ status: 422 });
@@ -345,12 +413,12 @@ describe('configuração da loja', () => {
   it('ligar a loja exige aceitar a taxa da loja online', async () => {
     const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', mp: { userId: '555' }, feeAcceptedAt: null, shipping: { pickup: { enabled: true } }, toJSON() { return { ...this }; } };
     const stores: any = {
-      findOne: jest.fn(async () => doc), updateOne: jest.fn(async (_q, u) => Object.assign(doc, Object.fromEntries(Object.entries(u.$set).filter(([k]) => !k.includes('.'))))),
+      findOne: jest.fn(() => Object.assign(Promise.resolve(doc), { select: () => ({ lean: async () => ({ shipping: {} }) }) })), updateOne: jest.fn(async (_q, u) => Object.assign(doc, Object.fromEntries(Object.entries(u.$set).filter(([k]) => !k.includes('.'))))),
       findById: () => ({ select: () => ({ lean: async () => ({ shipping: {} }) }) }),
     };
     const settings: any = { policy: async () => ({ onlineRateBps: 150, directoryRateBps: 300 }) };
     const ents: any = { findEnterpriseById: async () => ({ createdAt: new Date('2020-01-01'), trialEndsAt: new Date('2020-02-01') }) };
-    const svc = new StoreService(stores, ents, {} as any, {} as any, {} as any, settings, {} as any);
+    const svc = new StoreService(stores, ents, {} as any, {} as any, {} as any, settings, {} as any, {} as any);
     await expect(svc.update(String(eid), { enabled: true })).rejects.toMatchObject({ response: expect.objectContaining({ code: 'FEE_ACCEPT_REQUIRED' }) });
     const v = await svc.update(String(eid), { enabled: true, acceptOnlineFee: true });
     expect(v).toMatchObject({ enabled: true, fees: { onlineRateBps: 150, directoryRateBps: 300, waived: null } });
@@ -358,16 +426,173 @@ describe('configuração da loja', () => {
     expect(doc.feeAcceptedRates).toEqual({ onlineRateBps: 150, directoryRateBps: 300 });
   });
 
-  it('não liga sem Mercado Pago conectado', async () => {
-    const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', mp: { userId: '' }, shipping: { pickup: { enabled: true } }, feeAcceptedAt: new Date(), toJSON() { return { ...this }; } };
+  it('salvar só a aparência (aba Tema) não desliga a loja, mesmo com o checklist incompleto', async () => {
+    const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', enabled: true, mp: { userId: '' }, shipping: { pickup: { enabled: true } }, feeAcceptedAt: new Date(), theme: { accent: '#111111' }, toJSON() { return { ...this }; } };
     const stores: any = {
-      findOne: jest.fn(async () => doc), updateOne: jest.fn(async (_q, u) => Object.assign(doc, Object.fromEntries(Object.entries(u.$set).filter(([k]) => !k.includes('.'))))),
+      findOne: jest.fn(() => Object.assign(Promise.resolve(doc), { select: () => ({ lean: async () => ({ shipping: {} }) }) })), updateOne: jest.fn(async (_q, u) => Object.assign(doc, Object.fromEntries(Object.entries(u.$set).filter(([k]) => !k.includes('.'))))),
       findById: () => ({ select: () => ({ lean: async () => ({ shipping: {} }) }) }),
     };
     const settings: any = { policy: async () => ({ onlineRateBps: 150, directoryRateBps: 300 }) };
-    const svc = new StoreService(stores, { findEnterpriseById: async () => ({}) } as any, {} as any, {} as any, {} as any, settings, {} as any);
+    const storage: any = { resolve: async (_e: string, _k: string, v: string) => v, release: async () => undefined };
+    const svc = new StoreService(stores, { findEnterpriseById: async () => ({}) } as any, {} as any, {} as any, {} as any, settings, {} as any, storage);
+    await svc.update(String(eid), { theme: { accent: '#FF3D00', font: 'cinzel' } } as any);
+    expect(doc.enabled).toBe(true);
+    await expect(svc.update(String(eid), { minOrderCents: 500 } as any)).rejects.toMatchObject({ status: 422 });
+    expect(doc.enabled).toBe(false);
+  });
+
+  it('não liga sem Mercado Pago conectado', async () => {
+    const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', mp: { userId: '' }, shipping: { pickup: { enabled: true } }, feeAcceptedAt: new Date(), toJSON() { return { ...this }; } };
+    const stores: any = {
+      findOne: jest.fn(() => Object.assign(Promise.resolve(doc), { select: () => ({ lean: async () => ({ shipping: {} }) }) })), updateOne: jest.fn(async (_q, u) => Object.assign(doc, Object.fromEntries(Object.entries(u.$set).filter(([k]) => !k.includes('.'))))),
+      findById: () => ({ select: () => ({ lean: async () => ({ shipping: {} }) }) }),
+    };
+    const settings: any = { policy: async () => ({ onlineRateBps: 150, directoryRateBps: 300 }) };
+    const svc = new StoreService(stores, { findEnterpriseById: async () => ({}) } as any, {} as any, {} as any, {} as any, settings, {} as any, {} as any);
     await expect(svc.update(String(eid), { enabled: true })).rejects.toMatchObject({ status: 422, message: expect.stringContaining('Mercado Pago') });
     expect(doc.enabled).toBe(false);
   });
 
+});
+
+describe('preço da loja online e banners', () => {
+  it('produto com preço online: vitrine e checkout cobram o preço online', async () => {
+    const t = setup();
+    (prodA as any).onlinePrice = 179.9;
+    try {
+      const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+      expect(r.totalCents).toBe(17990);
+      expect(t.docs.get(r.orderId).items[0]).toMatchObject({ unitPriceCents: 17990, originalUnitPriceCents: 18990 });
+    } finally { delete (prodA as any).onlinePrice; }
+    expect(onlineEffectivePrice({ price: 100, priceWithDiscount: 90, onlinePrice: null })).toBe(90);
+    expect(onlineEffectivePrice({ price: 100, priceWithDiscount: 90, onlinePrice: 120 })).toBe(120);
+  });
+
+  it('banners: até 6, imagem válida e link só interno ou https', async () => {
+    const { plainToInstance } = require('class-transformer');
+    const { validate } = require('class-validator');
+    const img = 'data:image/webp;base64,AAAA';
+    const ok = plainToInstance(StoreUpdateDto, { slides: [{ image: img, title: 'Coleção de verão', link: 'cat:' + 'a'.repeat(24) }, { image: img, link: 'https://instagram.com/bella' }, { image: img, link: '#ofertas' }] });
+    expect(await validate(ok)).toHaveLength(0);
+    for (const bad of [{ image: 'javascript:alert(1)' }, { image: img, link: 'javascript:alert(1)' }, { image: img, link: 'http://inseguro.com' }]) {
+      expect((await validate(plainToInstance(StoreUpdateDto, { slides: [bad] }))).length).toBeGreaterThan(0);
+    }
+    expect((await validate(plainToInstance(StoreUpdateDto, { slides: Array(7).fill({ image: img }) }))).length).toBeGreaterThan(0);
+  });
+});
+
+describe('prévia da loja desligada', () => {
+  const mk = (enabled: boolean) => {
+    const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', enabled, ordersPaused: false, mp: { userId: '' }, shipping: {}, theme: {}, contacts: {}, policies: {}, toJSON() { return { ...this }; } };
+    const stores: any = { findOne: jest.fn(async () => doc) };
+    const ents: any = { findEnterpriseById: async () => ({ status: 'active', billing: { status: 'active' } }) };
+    return new StoreService(stores, ents, {} as any, { list: async () => [] } as any, {} as any, { policy: async () => ({}) } as any, {} as any, {} as any);
+  };
+  it('sem token, loja desligada não existe; com o token do dono aparece, marcada como prévia e sem aceitar pedidos', async () => {
+    const svc = mk(false);
+    await expect(svc.publicBySlug('bella')).rejects.toMatchObject({ status: 404 });
+    const { token } = await svc.previewLink(String(eid));
+    await expect(svc.publicBySlug('bella', { preview: token })).resolves.toMatchObject({ preview: true, closed: true });
+    await expect(svc.publicBySlug('bella', { preview: token, forOrder: true })).rejects.toMatchObject({ status: 409 });
+    await expect(svc.publicBySlug('bella', { preview: token.replace(/.$/, (c) => (c === 'a' ? 'b' : 'a')) })).rejects.toMatchObject({ status: 404 });
+    const [id, , sig] = token.split('.');
+    await expect(svc.publicBySlug('bella', { preview: `${id}.${Date.now() - 1000}.${sig}` })).rejects.toMatchObject({ status: 404 });
+  });
+  it('loja suspensa pela plataforma: nem a prévia abre e o lojista não consegue religar', async () => {
+    const doc: any = { _id: storeId, enterpriseId: eid, slug: 'bella', name: 'Bella', enabled: false, mp: { userId: '555' }, shipping: { pickup: { enabled: true } }, theme: {}, contacts: {}, policies: {}, feeAcceptedAt: new Date(), adminBlock: { at: new Date(), reason: 'Denúncia de produto falsificado', by: 'adm@x.com' }, toJSON() { return { ...this }; } };
+    const stores: any = { findOne: jest.fn(async () => doc), updateOne: jest.fn() };
+    const svc = new StoreService(stores, { findEnterpriseById: async () => ({ status: 'active' }) } as any, {} as any, {} as any, {} as any, { policy: async () => ({}) } as any, {} as any, {} as any);
+    const { token } = await svc.previewLink(String(eid));
+    await expect(svc.publicBySlug('bella', { preview: token })).rejects.toMatchObject({ status: 404 });
+    await expect(svc.update(String(eid), { enabled: true })).rejects.toMatchObject({ status: 403, response: expect.objectContaining({ code: 'STORE_BLOCKED', message: expect.stringContaining('produto falsificado') }) });
+    expect(stores.updateOne).not.toHaveBeenCalled();
+  });
+  it('loja ligada ignora o token (não fica marcada como prévia)', async () => {
+    const svc = mk(true);
+    const { token } = await svc.previewLink(String(eid));
+    await expect(svc.publicBySlug('bella', { preview: token })).resolves.toMatchObject({ preview: false, closed: false });
+  });
+});
+
+describe('dados do vendedor e aceite da compra', () => {
+  it('CPF/CNPJ com dígito verificador', () => {
+    const { validDoc, formatDoc } = require('../common/br-doc');
+    expect(validDoc('11.222.333/0001-81')).toBe(true);
+    expect(validDoc('11.222.333/0001-82')).toBe(false);
+    expect(validDoc('529.982.247-25')).toBe(true);
+    expect(validDoc('111.111.111-11')).toBe(false);
+    expect(formatDoc('11222333000181')).toBe('11.222.333/0001-81');
+  });
+  it('pedido guarda a prova do aceite (data, versão, IP)', async () => {
+    const t = setup();
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, termsVersion: '2026-11-02', items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' } as any, null, '200.1.2.3');
+    expect(t.docs.get(r.orderId).consent).toMatchObject({ termsVersion: '2026-11-02', ip: '200.1.2.3', acceptedAt: expect.any(Date) });
+  });
+});
+
+describe('pedido na mesa (bares e restaurantes)', () => {
+  const tableQuote = (t: ReturnType<typeof setup>) => t.stores.quote.mockImplementation(async () => [{ id: 'table', kind: 'table', name: 'Na mesa', priceCents: 0, etaText: 'Levamos até você', free: true }]);
+  it('pedido vai para a mesa escolhida, sem endereço nem frete', async () => {
+    const t = setup(); t.store.tables = { enabled: true, count: 12, label: 'Mesa' }; tableQuote(t);
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'table', table: 7 });
+    const doc = t.docs.get(r.orderId);
+    expect(doc).toMatchObject({ table: 7, address: null, shipping: { kind: 'table', name: 'Mesa 7', priceCents: 0 } });
+    expect(r.totalCents).toBe(18990);
+    expect(t.svc.present(doc)).toMatchObject({ table: 7 });
+  });
+  it('mesa fora do intervalo ou não informada é recusada antes de reservar estoque', async () => {
+    const t = setup(); t.store.tables = { enabled: true, count: 12, label: 'Mesa' }; tableQuote(t);
+    await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'table', table: 13 })).rejects.toMatchObject({ status: 422 });
+    await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'table' })).rejects.toMatchObject({ status: 422 });
+    expect(t.products.decreaseQuantity).not.toHaveBeenCalled();
+  });
+  it('pedido de mesa não pode ser marcado como "enviado"', () => {
+    expect(canMove('paid', 'shipped', 'table')).toBe(false);
+    expect(canMove('paid', 'preparing', 'table')).toBe(true);
+    expect(canMove('preparing', 'delivered', 'table')).toBe(true);
+    expect(canMove('paid', 'ready_for_pickup', 'table')).toBe(false);
+  });
+  it('a cotação oferece "na mesa" só quando a loja ativou', async () => {
+    const svc = new StoreService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+    const base: any = { shipping: { pickup: { enabled: true } }, tables: { enabled: false } };
+    expect((await svc.quote(base, null, [])).map((o) => o.id)).toEqual(['pickup']);
+    base.tables = { enabled: true, count: 5, label: 'Comanda', payment: 'upfront' };
+    expect((await svc.quote(base, null, [])).map((o) => o.kind)).toEqual(['table', 'pickup']);
+    // Comanda (paga no fim): a mesa não passa pelo checkout.
+    base.tables.payment = 'tab';
+    expect((await svc.quote(base, null, [])).map((o) => o.kind)).toEqual(['pickup']);
+  });
+
+  it('o modo da loja limita as formas de entrega', async () => {
+    const svc = new StoreService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+    const s: any = { mode: 'catalog', shipping: { pickup: { enabled: true }, fixed: { enabled: true, priceCents: 1000 }, local: { enabled: true, cepRanges: [{ from: '60000000', to: '60999999' }] } }, tables: { enabled: false } };
+    expect((await svc.quote(s, '60165121', [])).map((o) => o.kind)).toEqual(['pickup', 'local']);
+    s.mode = 'ecommerce';
+    expect((await svc.quote(s, '60165121', [])).map((o) => o.kind)).toEqual(['pickup', 'local', 'fixed']);
+    expect(modeOf({ tables: { enabled: true } })).toBe('menu');
+    expect(modeOf({ theme: { layout: 'classic' } })).toBe('ecommerce');
+  });
+});
+
+describe('vídeos da vitrine', () => {
+  it('reconhece MP4, MOV e WEBM pela assinatura e recusa o resto', () => {
+    const mp4 = Buffer.from('000000186674797069736f6d0000020069736f6d', 'hex');
+    const mov = Buffer.from('0000001466747970717420200000000071742020', 'hex');
+    const webm = Buffer.from('1a45dfa3a34286810142f7810142f2810442f381', 'hex');
+    expect(sniffVideo(mp4)).toBe('video/mp4');
+    expect(sniffVideo(mov)).toBe('video/quicktime');
+    expect(sniffVideo(webm)).toBe('video/webm');
+    expect(sniffVideo(Buffer.from('<html><script>alert(1)</script>'))).toBeNull();
+    expect(sniffVideo(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))).toBeNull(); // PNG
+  });
+  it('entende os trechos pedidos pelo player', () => {
+    expect(parseRange(undefined, 1000)).toBeNull();
+    expect(parseRange('bytes=0-', 1000)).toEqual({ start: 0, end: 999 });
+    expect(parseRange('bytes=100-199', 1000)).toEqual({ start: 100, end: 199 });
+    expect(parseRange('bytes=900-5000', 1000)).toEqual({ start: 900, end: 999 });
+    expect(parseRange('bytes=-100', 1000)).toEqual({ start: 900, end: 999 });
+    expect(parseRange('bytes=1000-', 1000)).toBe('invalid');
+    expect(parseRange('bytes=5-2', 1000)).toBe('invalid');
+    expect(parseRange('items=0-1', 1000)).toBe('invalid');
+  });
 });

@@ -32,7 +32,7 @@ describe('AdminService.updateEnterprise (teste grátis e teto)', () => {
     const ents: any = { findById: jest.fn().mockResolvedValue(target) };
     const es = { adminPatch: jest.fn().mockResolvedValue({ _id: new Types.ObjectId(), name: 'n', email: 'e', status: 'active', billing: { status: 'active' }, createdAt: new Date() }) };
     const audit = { create: jest.fn().mockResolvedValue({}) };
-    const svc = new AdminService(ents, {} as any, {} as any, {} as any, {} as any, {} as any, audit as any, es as any, {} as any, {} as any, {} as any);
+    const svc = new AdminService(ents, {} as any, {} as any, {} as any, {} as any, {} as any, audit as any, es as any, {} as any, {} as any, {} as any, {} as any, {} as any);
     return { svc, es, audit };
   };
   const actor = { id: new Types.ObjectId().toHexString(), email: 'adm@x.com' };

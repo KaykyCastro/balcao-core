@@ -4,8 +4,11 @@ import { Model, Types } from 'mongoose';
 import { EnterpriseSchema } from '../enterprise/schema/enterprise.schema';
 import { Message } from './message.schema';
 import { InboxQuery, SendMessageDto, SentQuery } from './messages.dto';
+import { crossTenant } from '../common/security/tenant-guard.plugin';
 
 const BATCH = 500;
+/** Remetente dos avisos automáticos (fora do histórico do admin). */
+export const SYSTEM_SENDER = 'sistema@balcao';
 
 @Injectable()
 export class MessagesService {
@@ -67,18 +70,37 @@ export class MessagesService {
     return { broadcastId: String(broadcastId), recipients };
   }
 
+  /** Mesmo aviso para uma lista de empresas (um envio só no histórico). */
+  async sendTo(sender: { email: string }, enterpriseIds: Types.ObjectId[], dto: Omit<SendMessageDto, 'enterpriseId'>) {
+    const broadcastId = new Types.ObjectId();
+    const base = { broadcastId, title: dto.title, body: dto.body, level: dto.level ?? 'info', senderEmail: sender.email, readAt: null };
+    for (let i = 0; i < enterpriseIds.length; i += BATCH) {
+      await this.model.insertMany(enterpriseIds.slice(i, i + BATCH).map((enterpriseId) => ({ ...base, enterpriseId })), { ordered: false });
+    }
+    return { broadcastId: String(broadcastId), recipients: enterpriseIds.length };
+  }
+
+  /**
+   * Aviso automático para uma empresa (novidades da própria loja, ex.: pedido para ser cliente).
+   * Não aparece no histórico de envios do admin (remetente do sistema). Falha não derruba a ação que avisou.
+   */
+  async notify(enterpriseId: string | Types.ObjectId, n: { title: string; body: string; link?: string; level?: 'info' | 'warning' }) {
+    const link = n.link && /^\/app(\/[\w\-/?=&.%]*)?$/.test(n.link) ? n.link : '';
+    await this.model.create({ enterpriseId: new Types.ObjectId(String(enterpriseId)), broadcastId: new Types.ObjectId(), title: n.title.slice(0, 120), body: n.body.slice(0, 2000), level: n.level ?? 'info', senderEmail: SYSTEM_SENDER, readAt: null, link });
+  }
+
   /** Histórico de envios (um item por envio, com quantos receberam e quantos leram). */
   async sent(q: SentQuery) {
-    const match = q.enterpriseId ? { enterpriseId: new Types.ObjectId(q.enterpriseId) } : {};
+    const match = { senderEmail: { $ne: SYSTEM_SENDER }, ...(q.enterpriseId ? { enterpriseId: new Types.ObjectId(q.enterpriseId) } : {}) };
     const grouped = [
       { $match: match },
       { $group: { _id: '$broadcastId', title: { $first: '$title' }, body: { $first: '$body' }, level: { $first: '$level' }, senderEmail: { $first: '$senderEmail' }, createdAt: { $first: '$createdAt' }, enterpriseId: { $first: '$enterpriseId' }, recipients: { $sum: 1 }, read: { $sum: { $cond: [{ $ne: ['$readAt', null] }, 1, 0] } } } },
     ];
     const [rows, count] = await Promise.all([
-      this.model.aggregate<{ _id: Types.ObjectId; title: string; body: string; level: string; senderEmail: string; createdAt: Date; enterpriseId: Types.ObjectId; recipients: number; read: number }>([
+      crossTenant(this.model, 'admin: histórico de avisos enviados a todas as lojas').aggregate<{ _id: Types.ObjectId; title: string; body: string; level: string; senderEmail: string; createdAt: Date; enterpriseId: Types.ObjectId; recipients: number; read: number }>([
         ...grouped, { $sort: { createdAt: -1 } }, { $skip: (q.page - 1) * q.limit }, { $limit: q.limit },
       ]),
-      this.model.aggregate<{ n: number }>([...grouped, { $count: 'n' }]),
+      crossTenant(this.model, 'admin: histórico de avisos enviados a todas as lojas').aggregate<{ n: number }>([...grouped, { $count: 'n' }]),
     ]);
     const single = rows.filter((r) => r.recipients === 1).map((r) => r.enterpriseId);
     const names = new Map((await this.enterprises.find({ _id: { $in: single } }).select('name')).map((e) => [String(e._id), e.name]));
@@ -101,6 +123,6 @@ export class MessagesService {
   }
 
   private present(m: Message & { _id: unknown; createdAt?: Date }) {
-    return { id: String(m._id), title: m.title, body: m.body, level: m.level, createdAt: m.createdAt, readAt: m.readAt };
+    return { id: String(m._id), title: m.title, body: m.body, level: m.level, createdAt: m.createdAt, readAt: m.readAt, link: m.link || null };
   }
 }

@@ -32,25 +32,26 @@ export class Invoice {
   @Prop({ type: Date, default: null })
   paidAt: Date | null;
 
-  @Prop({ type: String, enum: ['infinitepay', 'manual', null], default: null })
-  paidVia: 'infinitepay' | 'manual' | null;
+  @Prop({ type: String, enum: ['mercadopago', 'manual', null], default: null })
+  paidVia: 'mercadopago' | 'manual' | null;
 
-  // ---- InfinitePay (checkout por link). order_nsu = _id da fatura.
+  // ---- Mercado Pago (Checkout Pro na conta do Balcão). external_reference = _id da fatura.
   @Prop({ type: String, default: null })
   checkoutUrl: string | null;
 
   @Prop({ type: String, default: null })
-  checkoutSlug: string | null;
+  preferenceId: string | null;
 
   /** Reserva atômica: impede dois links simultâneos para a mesma fatura. */
   @Prop({ type: Date, default: null })
   checkoutLockedAt: Date | null;
 
   @Prop({ type: String, default: null, index: true, sparse: true })
-  transactionNsu: string | null;
+  paymentId: string | null;
 
+  /** pix (bank_transfer), credit_card, debit_card, account_money... */
   @Prop({ type: String, default: null })
-  captureMethod: string | null;
+  paymentMethod: string | null;
 
   @Prop({ type: Number, default: null })
   paidAmountCents: number | null;
@@ -58,6 +59,10 @@ export class Invoice {
   /** Motivo/observação do admin (pagamento manual, extensão de prazo, cancelamento). */
   @Prop({ type: String, default: null, maxlength: 300 })
   note: string | null;
+
+  /** Avisos já enviados desta fatura (reminder.rules.ts): um por tipo, com os canais que saíram. */
+  @Prop({ type: [{ _id: false, kind: String, at: Date, channels: [String] }], default: [] })
+  reminders: { kind: string; at: Date; channels: string[] }[];
 }
 
 export const InvoiceSchemaFactory = SchemaFactory.createForClass(Invoice);

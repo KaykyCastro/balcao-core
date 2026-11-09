@@ -9,4 +9,8 @@ export class RegisterDto extends EnterpriseCreateDto {
   /** Versão dos termos que a pessoa viu (ex.: 2026-10-30). Guardada junto com a data do aceite. */
   @IsOptional() @IsString() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'Versão dos termos inválida' })
   termsVersion?: string;
+
+  /** Versão da Política de Privacidade apresentada no cadastro (ciência, não consentimento: a base legal é o contrato). */
+  @IsOptional() @IsString() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'Versão da política inválida' })
+  privacyVersion?: string;
 }

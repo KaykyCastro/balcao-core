@@ -27,6 +27,10 @@ export class Message {
 
   @Prop({ type: Date, default: null })
   readAt: Date | null;
+
+  /** Aviso automático do sistema: caminho do painel para resolver (ex.: /app/clientes). Só caminho do próprio site. */
+  @Prop({ default: '', maxlength: 200 })
+  link: string;
 }
 export const MessageSchemaFactory = SchemaFactory.createForClass(Message);
 MessageSchemaFactory.index({ enterpriseId: 1, createdAt: -1 });

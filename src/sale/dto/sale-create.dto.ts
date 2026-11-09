@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsIn, IsInt, IsMongoId, IsOptional, Max, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsIn, IsInt, IsMongoId, IsOptional, IsString, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
 
 export class SaleItemInputDto {
   @IsMongoId()
@@ -7,6 +7,13 @@ export class SaleItemInputDto {
 
   @IsInt() @Min(1) @Max(100_000)
   quantity: number;
+}
+
+/** Desconto no carrinho: `percent` em pontos-base (1000 = 10%) ou `amount` em centavos. O valor final é calculado pela API. */
+export class SaleDiscountDto {
+  @IsIn(['percent', 'amount']) mode: 'percent' | 'amount';
+  @IsInt() @Min(1) @Max(100_000_000) value: number;
+  @IsOptional() @IsString() @MaxLength(120) reason?: string;
 }
 
 export class SaleCreateDto {
@@ -26,4 +33,7 @@ export class SaleCreateDto {
   @ValidateNested({ each: true })
   @Type(() => SaleItemInputDto)
   items: SaleItemInputDto[];
+
+  @IsOptional() @ValidateNested() @Type(() => SaleDiscountDto)
+  discount?: SaleDiscountDto;
 }
