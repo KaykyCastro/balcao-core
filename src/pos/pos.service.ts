@@ -139,7 +139,7 @@ export class PosService {
         if (c.pix?.mode !== 'mercadopago') throw new ConflictException('Ative o Pix pelo Mercado Pago em Configurações → Pagamentos no balcão');
         const cust = dto.customerId ? await this.customers.getCustomerById(eid, dto.customerId).catch(() => null) : null;
         const email = (cust as { email?: string } | null)?.email || 'cliente.balcao@balcao.app';
-        const o = await this.mp.createPixOrder({ accessToken: token, amountCents: totalCents, reference: ref, idem: `pos-${id}`, payerEmail: email, expiresMin: 30 });
+        const o = await this.mp.createPixOrder({ accessToken: token, amountCents: totalCents, reference: ref, idem: `pos-${id}`, payerEmail: email, expiresMin: 30, statementDescriptor: ent.name });
         extra = { providerRef: o.id, qrCode: o.qrCode, qrBase64: o.qrBase64 };
       } else {
         if (!c.point?.enabled || !c.point.terminalId) throw new ConflictException('Escolha a maquininha Point em Configurações → Pagamentos no balcão');

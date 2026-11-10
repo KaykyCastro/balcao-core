@@ -66,6 +66,11 @@ function preapproval(r: Record<string, any>): MpPreapproval {
   };
 }
 
+/** Texto da fatura do cartão: sem acento, só letras, números e espaço, até 22 caracteres (limite das bandeiras). */
+export function statementDescriptorOf(name?: string | null): string {
+  return (name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 22).trim().toUpperCase();
+}
+
 @Injectable()
 export class MercadoPagoClient {
   private readonly logger = new Logger(MercadoPagoClient.name);
@@ -76,6 +81,29 @@ export class MercadoPagoClient {
     const t = this.config.get<string>('MP_ACCESS_TOKEN')?.trim();
     if (!t) throw new ServiceUnavailableException('Pagamento indisponível: MP_ACCESS_TOKEN não configurado');
     return t;
+  }
+
+  /**
+   * ID de plataforma (qualidade da integração): o time de Partners do Mercado Pago gera e entrega depois de aprovar a
+   * solução. Com MP_PLATFORM_ID definido, vai no cabeçalho x-platform-id de toda chamada com token.
+   */
+  private platformHeader(token?: string): Record<string, string> {
+    const id = this.config.get<string>('MP_PLATFORM_ID')?.trim();
+    return id && token ? { 'X-Platform-Id': id } : {};
+  }
+
+  /**
+   * Configuração "online" das ordens (qualidade da integração): nome na fatura do cartão, URLs de retorno em HTTPS e 3DS
+   * com liability shift. As URLs só vão quando o site está em HTTPS (o Mercado Pago recusa http).
+   */
+  private onlineConfig(statementDescriptor?: string) {
+    const front = (this.config.get<string>('FRONTEND_URL') ?? '').replace(/\/+$/, '');
+    const urls = front.startsWith('https://') ? { success_url: `${front}/app/vendas?pix=aprovado`, failure_url: `${front}/app/vendas?pix=recusado`, pending_url: `${front}/app/vendas?pix=pendente` } : {};
+    const descriptor = statementDescriptorOf(statementDescriptor);
+    return {
+      ...(descriptor ? { statement_descriptor: descriptor } : {}),
+      online: { ...urls, transaction_security: { validation: 'on_fraud_risk', liability_shift: 'required' } },
+    };
   }
 
   get configured() { return !!(this.config.get('MP_CLIENT_ID') && this.config.get('MP_CLIENT_SECRET') && this.config.get('MP_REDIRECT_URI')); }
@@ -90,7 +118,7 @@ export class MercadoPagoClient {
     try {
       res = await fetch(`${API}${path}`, {
         method,
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(idem ? { 'X-Idempotency-Key': idem } : {}), ...extra },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(idem ? { 'X-Idempotency-Key': idem } : {}), ...this.platformHeader(token), ...extra },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(15_000),
       });
@@ -234,13 +262,20 @@ export class MercadoPagoClient {
   }
 
   /** Pix com QR dinâmico na conta do lojista: o Mercado Pago avisa quando cai. */
-  async createPixOrder(p: { accessToken: string; amountCents: number; reference: string; idem: string; payerEmail: string; expiresMin?: number }): Promise<MpOrder> {
+  async createPixOrder(p: { accessToken: string; amountCents: number; reference: string; idem: string; payerEmail: string; expiresMin?: number; statementDescriptor?: string }): Promise<MpOrder> {
     const body = {
       type: 'online', processing_mode: 'automatic', external_reference: p.reference, total_amount: (p.amountCents / 100).toFixed(2),
       payer: { email: p.payerEmail },
       transactions: { payments: [{ amount: (p.amountCents / 100).toFixed(2), payment_method: { id: 'pix', type: 'bank_transfer' }, expiration_time: `PT${Math.max(30, p.expiresMin ?? 30)}M` }] },
     };
-    return mpOrder(await this.call<Record<string, any>>('POST', '/v1/orders', body, p.accessToken, p.idem));
+    try {
+      return mpOrder(await this.call<Record<string, any>>('POST', '/v1/orders', { ...body, config: this.onlineConfig(p.statementDescriptor) }, p.accessToken, p.idem));
+    } catch (e) {
+      // Se o Mercado Pago recusar algum campo de qualidade (ex.: 3DS num Pix), o Pix do caixa não pode parar: manda sem eles.
+      if (!(e instanceof BadGatewayException) || !/\((400|422)\)/.test(e.message)) throw e;
+      this.logger.warn(`Ordem Pix recusada com config de qualidade; tentando sem: ${(e as Error).message}`);
+      return mpOrder(await this.call<Record<string, any>>('POST', '/v1/orders', body, p.accessToken, `${p.idem}-b`));
+    }
   }
 
   async order(accessToken: string, id: string): Promise<MpOrder> {

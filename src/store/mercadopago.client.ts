@@ -45,7 +45,7 @@ export class MercadoPagoClient {
     try {
       res = await fetch(`${API}${path}`, {
         method,
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(idem ? { 'X-Idempotency-Key': idem } : {}) },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(idem ? { 'X-Idempotency-Key': idem } : {}), ...(token && this.config.get<string>('MP_PLATFORM_ID')?.trim() ? { 'X-Platform-Id': this.config.get<string>('MP_PLATFORM_ID')!.trim() } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(15_000),
       });
