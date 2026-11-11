@@ -1,5 +1,5 @@
 import { ConflictException, HttpException, HttpStatus, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
-import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
+import { isOrderId, MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
@@ -247,11 +247,28 @@ export class BillingService {
   }
 
   /** Gera (ou reaproveita) o link de pagamento da fatura no Mercado Pago (Pix ou cartão), na conta do Balcão. */
+  /** E-mail da conta do Balcão no Mercado Pago (quem recebe as faturas), em minúsculas. Guardado; vazio se falhar. */
+  private platformMail: Promise<string> | null = null;
+  private platformEmail(): Promise<string> {
+    this.platformMail ??= this.mp.me(this.mp.platformToken).then((m) => m.email.trim().toLowerCase()).catch(() => { this.platformMail = null; return ''; });
+    return this.platformMail;
+  }
+
   async payInvoice(enterpriseId: string, invoiceId: string) {
     const invoice = await this.invoiceModel.findOne({ _id: invoiceId, enterpriseId });
     if (!invoice) throw new NotFoundException('Fatura não encontrada');
     if (invoice.status !== 'pending') throw new ConflictException(`Fatura ${invoice.status === 'paid' ? 'já paga' : 'cancelada'}`);
-    if (invoice.checkoutUrl) return this.present(invoice);
+    // Ordem já criada: reaproveita, a não ser que o pagamento dela tenha sido recusado ou cancelado. Uma ordem de
+    // Checkout Pro que falhou não aceita outra tentativa (o comprador veria "recusado" de novo, sem nem escolher o meio).
+    let retry = '';
+    if (invoice.checkoutUrl) {
+      if (!invoice.preferenceId || !isOrderId(invoice.preferenceId)) return this.present(invoice);
+      const st = await this.mp.payment(invoice.preferenceId, this.mp.platformToken).then((x) => x.status).catch(() => '');
+      if (st !== 'rejected' && st !== 'cancelled') return this.present(invoice);
+      retry = `-r${Date.now().toString(36)}`;
+      await this.invoiceModel.updateOne({ _id: invoice._id, checkoutUrl: invoice.checkoutUrl }, { $set: { checkoutUrl: null, preferenceId: null } });
+      this.logger.log(`Fatura ${String(invoice._id)}: ordem ${invoice.preferenceId} ${st}; criando outra`);
+    }
 
     // Reserva atômica (30 s): dois cliques/abas não criam dois links.
     const claimed = await this.invoiceModel.findOneAndUpdate(
@@ -271,12 +288,17 @@ export class BillingService {
     const id = String(invoice._id);
     const api = (this.config.get<string>('APP_URL') ?? '').replace(/\/$/, '');
     const front = (this.config.get<string>('FRONTEND_URL') ?? '').replace(/\/$/, '');
+    // Nunca o e-mail da própria conta que recebe como pagador: o Mercado Pago recusa como "pagar a si mesmo".
+    // Nesse caso a ordem vai sem pagador, e quem paga se identifica na tela do Mercado Pago.
+    const platformEmail = await this.platformEmail();
+    const selfPay = !!platformEmail && String(enterprise.email ?? '').trim().toLowerCase() === platformEmail;
     try {
       const pref = await this.mp.createPreference({
         accessToken: this.mp.platformToken,
         orderId: id,
+        idem: `pref-${id}${retry}`,
         items: [{ title: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`, description: 'Taxa mensal de uso do sistema de vendas Balcão ERP', categoryId: 'services', quantity: 1, unitCents: invoice.amountCents }],
-        payer: { name: enterprise.name, email: enterprise.email, document: enterprise.cnpj || sellerDoc, registeredAt: (enterprise as { createdAt?: Date }).createdAt ?? null },
+        payer: selfPay ? { name: enterprise.name } : { name: enterprise.name, email: enterprise.email, document: enterprise.cnpj || sellerDoc, registeredAt: (enterprise as { createdAt?: Date }).createdAt ?? null },
         backUrl: `${front}/app/pagamento?fatura=${id}`,
         notificationUrl: api.startsWith('https://') ? `${api}/billing/webhook/mercadopago?i=${id}&s=${sign('invoice', id)}` : undefined,
         statementDescriptor: 'BALCAO ERP',
