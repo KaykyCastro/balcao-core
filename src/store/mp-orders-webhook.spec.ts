@@ -72,9 +72,17 @@ describe('webhook único das ordens (Checkout Pro via Orders)', () => {
     expect(t.messages.notify).toHaveBeenCalled();
   });
 
+  it('aviso de pagamento (painel inscrito só em Pagamentos): confere e baixa a fatura do mesmo jeito', async () => {
+    const t = make();
+    const r = await t.svc.handle({}, { type: 'payment', action: 'payment.updated', user_id: '111', data: { id: '188006611105' } }, {});
+    expect(r.outcome).toBe('applied');
+    expect(t.mp.payment).toHaveBeenCalledWith('188006611105', 'PLAT');
+    expect(t.billing.confirm).toHaveBeenCalledWith(t.ref, '188006611105');
+  });
+
   it('assinatura inválida é recusada; conta desconhecida e aviso que não é de ordem são ignorados', async () => {
     await expect(make({ sigOk: false }).svc.handle({}, body('111'), { signature: 'x' })).rejects.toThrow('Assinatura inválida');
     expect((await make().svc.handle({}, body('999'), {})).outcome).toBe('store_not_found');
-    expect((await make().svc.handle({}, { type: 'payment', data: { id: '123' } }, {})).outcome).toBe('ignored');
+    expect((await make().svc.handle({}, { type: 'payment', data: { id: 'abc' } }, {})).outcome).toBe('ignored');
   });
 });

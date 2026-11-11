@@ -106,7 +106,10 @@ export class MpOrdersWebhookService {
     if (type === 'mp-connect') return this.connect(body, headers);
     if (type === 'topic_chargebacks_wh' || type === 'chargebacks') return this.chargeback(body, q, headers);
     const id = String(body?.data?.id ?? q['data.id'] ?? '');
-    if (type !== 'order' || !isOrderId(id)) return { received: true, outcome: 'ignored' };
+    // Ordem (ORD…) ou pagamento (número): os dois passam pelas mesmas conferências (a conta que recebeu, a referência,
+    // o valor). Com o painel inscrito só em "Pagamentos", a baixa acontece do mesmo jeito.
+    const ok = (type === 'order' && isOrderId(id)) || (type === 'payment' && /^\d{1,20}$/.test(id));
+    if (!ok) return { received: true, outcome: 'ignored' };
     if (!this.mp.verifySignature(id, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
     const userId = String(body?.user_id ?? '');
     if (!/^\d{1,20}$/.test(userId)) return { received: true, outcome: 'no_account' };
@@ -133,7 +136,7 @@ export class MpOrdersWebhookService {
         }
       }
     }
-    this.logger.log(`Ordem ${id} (conta ${userId}): ${outcome}`);
+    this.logger.log(`${type === 'order' ? 'Ordem' : 'Pagamento'} ${id} (conta ${userId}): ${outcome}`);
     return { received: true, outcome };
   }
 }
