@@ -291,7 +291,8 @@ export class MercadoPagoClient {
       ...(p.payer.email ? { payer: orderPayerOf(p.payer) } : {}),
       ...(minutes ? { expiration_time: `PT${minutes}M` } : {}), // Pix gerado vence junto com a reserva
       // Data de cadastro do pagador no Balcão (ajuda a aprovação): conta do lojista nas faturas, cadastro do cliente nos pedidos.
-      ...(p.payer.registeredAt ? { additional_info: { payer: { registration_date: new Date(p.payer.registeredAt).toISOString() } } } : {}),
+      // Na API de Orders as chaves de additional_info são planas ("payer.registration_date"); objeto aninhado dá 400.
+      ...(p.payer.registeredAt ? { additional_info: { 'payer.registration_date': new Date(p.payer.registeredAt).toISOString() } } : {}),
       config: {
         ...(descriptor ? { statement_descriptor: descriptor } : {}),
         online: { ...online, transaction_security: { validation: 'on_fraud_risk', liability_shift: 'required' } },

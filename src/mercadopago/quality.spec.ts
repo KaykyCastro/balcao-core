@@ -64,13 +64,15 @@ describe('Checkout Pro: itens de qualidade', () => {
     let body: any; let url = '';
     global.fetch = jest.fn(async (u: string, init: any) => { url = u; body = JSON.parse(init.body); return new Response(JSON.stringify({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://www.mercadopago.com.br/checkout/v1/redirect?order_id=ORD01ABCDEFGHIJKLMN' }), { status: 201, headers: { 'content-type': 'application/json' } }); }) as any;
     const mp = new MercadoPagoClient(new ConfigService({}));
-    const r = await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Batom', quantity: 2, unitCents: 1990 }], payer: { name: 'Ana Souza', email: 'a@x.com', document: '12345678909' }, backUrl: 'https://x/y', statementDescriptor: 'Pele Boa Cosméticos', maxInstallments: 6, marketplaceFeeCents: 120 });
+    const r = await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Batom', quantity: 2, unitCents: 1990 }], payer: { name: 'Ana Souza', email: 'a@x.com', document: '12345678909', registeredAt: new Date('2025-01-02T03:04:05Z') }, backUrl: 'https://x/y', statementDescriptor: 'Pele Boa Cosméticos', maxInstallments: 6, marketplaceFeeCents: 120 });
     expect(url).toMatch(/\/v1\/orders$/);
     expect(r).toEqual({ id: 'ORD01ABCDEFGHIJKLMN', initPoint: expect.stringMatching(/^https:/) });
     expect(body).toMatchObject({ type: 'online', processing_mode: 'manual', total_amount: '39.80', external_reference: 'o1', marketplace_fee: '1.20' });
     expect(body.items[0]).toMatchObject({ title: 'Batom', unit_price: '19.90', quantity: 2, description: 'Batom', category_id: 'others' });
     expect(body.payer).toMatchObject({ email: 'a@x.com', first_name: 'Ana', last_name: 'Souza', identification: { type: 'CPF', number: '12345678909' } });
     expect(body.config.statement_descriptor).toBe('PELE BOA COSMETICOS');
+    // Orders: additional_info com chave plana (objeto aninhado "payer" o Mercado Pago recusa com 400).
+    expect(body.additional_info).toEqual({ 'payer.registration_date': '2025-01-02T03:04:05.000Z' });
     expect(body.config.payment_method).toEqual({ not_allowed_types: ['ticket'], max_installments: 6 });
     expect(body.config.online).toMatchObject({ success_url: 'https://x/y', auto_return: 'approved', retries: { allowed: true } }); // recusa não encerra a ordem
   });
