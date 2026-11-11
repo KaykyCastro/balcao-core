@@ -75,12 +75,36 @@ export class MpOrdersWebhookService {
     return { received: true, outcome: 'disconnected' };
   }
 
+  /**
+   * Contestação (chargeback) aberta pelo comprador no banco. O Balcão não responde por ninguém: avisa quem recebeu
+   * (lojista no sino; plataforma no log de erro) para responder no painel do Mercado Pago dentro do prazo.
+   */
+  private async chargeback(body: Record<string, any>, q: Record<string, unknown>, headers: { signature?: string; requestId?: string }) {
+    const id = String(body?.data?.id ?? q['data.id'] ?? q.id ?? '');
+    if (!/^[\w-]{1,64}$/.test(id)) return { received: true, outcome: 'ignored' };
+    if (!this.mp.verifySignature(id, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
+    const userId = String(body?.user_id ?? '');
+    if (userId && userId === (await this.platformUserId().catch(() => ''))) {
+      this.logger.error(`Contestação ${id} na conta do Balcão (fatura): responder no painel do Mercado Pago`);
+      return { received: true, outcome: 'platform_chargeback' };
+    }
+    const store = /^\d{1,20}$/.test(userId) ? await this.storeModel.findOne({ 'mp.userId': userId }).select('_id enterpriseId').lean() : null;
+    if (!store) return { received: true, outcome: 'store_not_found' };
+    await this.messages.notify(store.enterpriseId as never, {
+      title: 'Contestação de pagamento no Mercado Pago', level: 'warning', link: '/app/loja?aba=pedidos',
+      body: `Um comprador contestou um pagamento no banco ou no cartão (contestação ${id}). Entre no Mercado Pago, em Atividade → Contestações, e envie os comprovantes da venda e da entrega dentro do prazo indicado lá.`,
+    }).catch(() => undefined);
+    this.logger.warn(`Contestação ${id} (conta ${userId}): lojista ${String(store.enterpriseId)} avisado`);
+    return { received: true, outcome: 'chargeback_notified' };
+  }
+
   async handle(q: Record<string, unknown>, body: Record<string, any>, headers: { signature?: string; requestId?: string }) {
     const type = String(body?.type ?? q.type ?? q.topic ?? '');
     // O painel tem um endereço só por aplicação: os avisos da assinatura no cartão (cobrança automática das faturas)
     // também chegam aqui e seguem para o mesmo tratamento de antes.
     if (type === 'subscription_preapproval' || type === 'subscription_authorized_payment') return this.autopay.webhook(q, body, headers);
     if (type === 'mp-connect') return this.connect(body, headers);
+    if (type === 'topic_chargebacks_wh' || type === 'chargebacks') return this.chargeback(body, q, headers);
     const id = String(body?.data?.id ?? q['data.id'] ?? '');
     if (type !== 'order' || !isOrderId(id)) return { received: true, outcome: 'ignored' };
     if (!this.mp.verifySignature(id, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');

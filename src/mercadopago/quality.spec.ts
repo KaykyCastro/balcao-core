@@ -72,7 +72,24 @@ describe('Checkout Pro: itens de qualidade', () => {
     expect(body.payer).toMatchObject({ email: 'a@x.com', first_name: 'Ana', last_name: 'Souza', identification: { type: 'CPF', number: '12345678909' } });
     expect(body.config.statement_descriptor).toBe('PELE BOA COSMETICOS');
     expect(body.config.payment_method).toEqual({ not_allowed_types: ['ticket'], max_installments: 6 });
-    expect(body.config.online).toMatchObject({ success_url: 'https://x/y', auto_return: 'approved' });
+    expect(body.config.online).toMatchObject({ success_url: 'https://x/y', auto_return: 'approved', retries: { allowed: true } }); // recusa não encerra a ordem
+  });
+
+  it('ordem completa recusada: a segunda tentativa ainda leva itens completos, pagador com nome, nome na fatura e parcelas', async () => {
+    const bodies: any[] = [];
+    global.fetch = jest.fn(async (_u: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return bodies.length === 1 ? new Response(JSON.stringify({ message: 'invalid' }), { status: 400, headers: { 'content-type': 'application/json' } }) : new Response(JSON.stringify({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://mp/x' }), { status: 201, headers: { 'content-type': 'application/json' } });
+    }) as any;
+    const mp = new MercadoPagoClient(new ConfigService({}));
+    await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Taxa', quantity: 1, unitCents: 500, description: 'Taxa mensal', categoryId: 'services' }], payer: { name: 'Ana Souza', email: 'a@x.com', document: '12345678909' }, backUrl: 'https://x/y', statementDescriptor: 'Balcao', maxInstallments: 3 });
+    expect(bodies).toHaveLength(2);
+    const safe = bodies[1];
+    expect(safe.items[0]).toEqual({ title: 'Taxa', unit_price: '5.00', quantity: 1, description: 'Taxa mensal', category_id: 'services', external_code: '1' });
+    expect(safe.payer).toEqual({ email: 'a@x.com', first_name: 'Ana', last_name: 'Souza' });
+    expect(safe.config).toMatchObject({ statement_descriptor: 'BALCAO', payment_method: { max_installments: 3 } });
+    expect(safe.config.online.transaction_security).toBeUndefined();
+    expect(safe.additional_info).toBeUndefined();
   });
 
   it('se o Mercado Pago recusar um campo opcional (400), a ordem sai só com o essencial', async () => {
@@ -84,7 +101,7 @@ describe('Checkout Pro: itens de qualidade', () => {
     const mp = new MercadoPagoClient(new ConfigService({}));
     await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Taxa', quantity: 1, unitCents: 500 }], payer: { name: 'Mesa 4' }, backUrl: 'https://x/y' });
     expect(bodies).toHaveLength(2);
-    expect(bodies[1].config).toEqual({ online: expect.objectContaining({ success_url: 'https://x/y' }) });
+    expect(bodies[1].config).toEqual({ online: expect.objectContaining({ success_url: 'https://x/y', retries: { allowed: true } }) });
     expect(bodies[1].payer).toBeUndefined(); // sem e-mail não manda pagador (o e-mail é obrigatório quando vai)
   });
 });

@@ -606,9 +606,10 @@ export class OrderService {
   async release(id: Types.ObjectId, status: 'expired' | 'cancelled', reason?: string, from: OrderStatus[] = ['pending_payment']): Promise<boolean> {
     const session = await this.connection.startSession();
     let done = false;
+    let unpaid: { storeId: unknown; ord: string } | null = null;
     try {
       await session.withTransaction(async () => {
-        done = false;
+        done = false; unpaid = null;
         const o = await this.orders.findOneAndUpdate(
           { _id: id, status: { $in: from }, stockReleased: false },
           { $set: { status, stockReleased: true, ...(reason ? { cancelReason: reason } : {}) }, $push: { history: { status, at: new Date(), note: reason } } },
@@ -621,12 +622,20 @@ export class OrderService {
           if (i.stockTracked !== false) await this.products.increaseQuantity(eid, String(i.productId), i.quantity, session);
         }
         await this.undoRewards(o, session);
+        if (o.status === 'pending_payment' && o.payment?.preferenceId) unpaid = { storeId: o.storeId, ord: o.payment.preferenceId };
         done = true;
       });
     } finally {
       await session.endSession();
     }
+    // Pedido que ninguém pagou: cancela a ordem no Mercado Pago também (o link deixa de aceitar pagamento).
+    if (unpaid) void this.cancelMpOrder(unpaid);
     return done;
+  }
+
+  private async cancelMpOrder(u: { storeId: unknown; ord: string }) {
+    try { await this.mp.cancelCheckoutOrder(u.ord, await this.stores.mpAccessToken(u.storeId as never)); }
+    catch { /* a ordem expira sozinha no Mercado Pago */ }
   }
 
   /** Rotina: pedidos sem pagamento depois do prazo devolvem o estoque. */

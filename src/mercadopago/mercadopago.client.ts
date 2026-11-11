@@ -120,7 +120,7 @@ export function orderAsPayment(r: Record<string, any>): MpPayment {
     : st === 'action_required' || st === 'processing' ? 'in_process' : st || 'pending';
   const pay = Array.isArray(r.transactions?.payments) ? r.transactions.payments[0] : null;
   return {
-    id: String(r.id ?? ''), status, statusDetail: det, externalReference: r.external_reference ? String(r.external_reference) : null,
+    id: String(r.id ?? ''), status, statusDetail: pay?.status_detail ? `${det}/${String(pay.status_detail)}` : det, externalReference: r.external_reference ? String(r.external_reference) : null,
     amountCents: cents(r.total_paid_amount ?? 0), collectorId: r.user_id != null ? String(r.user_id) : null,
     marketplaceFeeCents: cents(r.marketplace_fee ?? 0), method: pay?.payment_method?.type ? String(pay.payment_method.type) : null,
     approvedAt: status === 'approved' ? String(r.last_updated_date ?? '') || null : null,
@@ -239,9 +239,9 @@ export class MercadoPagoClient {
     try { return await run(); }
     catch (e) {
       if (e instanceof MercadoPagoError) {
-        this.logger.error(`Mercado Pago ${e.status} em ${path}: ${String(e.message).slice(0, 400)}`);
+        this.logger.error(`Mercado Pago ${e.status} em ${path}: ${String(e.message).slice(0, 300)} ${JSON.stringify((e as { causes?: unknown }).causes ?? []).slice(0, 900)}`);
         if (e.status === 401) throw new BadGatewayException('A conexão com o Mercado Pago expirou. Conecte a conta de novo em Loja online → Pagamento.');
-        throw new BadGatewayException(`O Mercado Pago recusou a requisição (${e.status})`);
+        throw new BadGatewayException(`O Mercado Pago recusou a requisição (${e.status}): ${JSON.stringify((e as { causes?: unknown }).causes ?? []).slice(0, 600)}`);
       }
       this.logger.error(`Mercado Pago sem resposta (${path}): ${(e as Error).message}`);
       throw new BadGatewayException('Não foi possível falar com o Mercado Pago');
@@ -260,6 +260,8 @@ export class MercadoPagoClient {
     const money = (c: number) => (c / 100).toFixed(2);
     const online = {
       success_url: p.backUrl, failure_url: p.backUrl, pending_url: p.backUrl, auto_return: 'approved',
+      // Sem isso, a primeira recusa encerra a ordem e toda nova tentativa (outro cartão, Pix) é recusada também.
+      retries: { allowed: true },
     };
     const minimal = {
       type: 'online', processing_mode: 'manual', total_amount: money(total), external_reference: p.orderId,
@@ -270,10 +272,22 @@ export class MercadoPagoClient {
     };
     const descriptor = statementDescriptorOf(p.statementDescriptor);
     const minutes = p.expiresAt ? Math.max(30, Math.ceil((p.expiresAt.getTime() - Date.now()) / 60_000)) : 0;
-    const full = {
+    // Degrau do meio: só os campos de qualidade básicos e bem documentados (itens completos, pagador com nome,
+    // nome na fatura, parcelas). Se a ordem completa for recusada por algum campo extra, estes pontos não se perdem.
+    const payerName = orderPayerOf(p.payer);
+    const safe = {
       ...minimal,
-      description: items[0]?.title ?? '',
+      description: (items.length === 1 ? items[0].title : items.map((i) => i.title).join(', ')).slice(0, 250),
       items: items.map((i) => ({ title: i.title, unit_price: money(i.unitCents), quantity: i.quantity, description: i.description, category_id: i.categoryId, external_code: i.code })),
+      ...(p.payer.email ? { payer: { email: p.payer.email, ...(payerName.first_name ? { first_name: payerName.first_name } : {}), ...(payerName.last_name ? { last_name: payerName.last_name } : {}) } } : {}),
+      config: {
+        ...(descriptor ? { statement_descriptor: descriptor } : {}),
+        online,
+        ...(p.maxInstallments && p.maxInstallments > 0 ? { payment_method: { max_installments: Math.min(12, p.maxInstallments) } } : {}),
+      },
+    };
+    const full = {
+      ...safe,
       ...(p.payer.email ? { payer: orderPayerOf(p.payer) } : {}),
       ...(minutes ? { expiration_time: `PT${minutes}M` } : {}), // Pix gerado vence junto com a reserva
       // Data de cadastro do pagador no Balcão (ajuda a aprovação): conta do lojista nas faturas, cadastro do cliente nos pedidos.
@@ -287,15 +301,31 @@ export class MercadoPagoClient {
     const idem = p.idem ?? `pref-${p.orderId}`;
     let r: Record<string, unknown>;
     const create = (body: Record<string, unknown>, key: string) => this.sdk('/v1/orders', () => this.sdkOrders(p.accessToken).create({ body: body as never, requestOptions: { idempotencyKey: key } }) as Promise<unknown>) as Promise<Record<string, unknown>>;
+    const refused = (e: unknown) => e instanceof BadGatewayException && /\((400|422)\)/.test(e.message);
     try { r = await create(full, idem); }
     catch (e) {
-      if (!(e instanceof BadGatewayException) || !/\((400|422)\)/.test(e.message)) throw e;
-      this.logger.warn(`Ordem de checkout recusada com os campos opcionais; tentando só com o essencial: ${e.message}`);
-      r = await create(minimal, `${idem}-b`);
+      if (!refused(e)) throw e;
+      this.logger.warn(`Ordem de checkout recusada com os campos opcionais; tentando com os campos básicos: ${(e as Error).message}`);
+      try { r = await create(safe, `${idem}-s`); }
+      catch (e2) {
+        if (!refused(e2)) throw e2;
+        this.logger.warn(`Ordem de checkout recusada também com os campos básicos; tentando só com o essencial: ${(e2 as Error).message}`);
+        r = await create(minimal, `${idem}-b`);
+      }
     }
     const initPoint = String(r.checkout_url ?? '');
     if (!/^https:\/\//.test(initPoint)) throw new BadGatewayException('O Mercado Pago não devolveu o link de pagamento');
     return { id: String(r.id ?? ''), initPoint };
+  }
+
+  /**
+   * Cancela uma ordem que ninguém pagou (fatura que ganhou ordem nova, pedido que expirou). Só ordens em aberto:
+   * erro do Mercado Pago aqui nunca derruba quem chamou (devolve false).
+   */
+  async cancelCheckoutOrder(orderId: string, accessToken: string): Promise<boolean> {
+    if (!isOrderId(orderId)) return false;
+    try { await this.sdk(`/v1/orders/${orderId}/cancel`, () => this.sdkOrders(accessToken).cancel({ id: orderId }) as Promise<unknown>); return true; }
+    catch (e) { this.logger.warn(`Não deu para cancelar a ordem ${orderId}: ${(e as Error).message}`); return false; }
   }
 
   // ------------------------------------------------------------------ assinatura (cobrança automática da fatura)

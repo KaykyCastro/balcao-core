@@ -65,6 +65,13 @@ describe('webhook único das ordens (Checkout Pro via Orders)', () => {
     expect((await make({ store }).svc.handle({}, { type: 'mp-connect', action: 'application.authorized', user_id: 222, data: { id: '222' } }, {})).outcome).toBe('noted');
   });
 
+  it('contestação (chargeback) na conta de um lojista: avisa no sino', async () => {
+    const store = { _id: new Types.ObjectId(), enterpriseId: new Types.ObjectId() };
+    const t = make({ store });
+    expect((await t.svc.handle({}, { type: 'topic_chargebacks_wh', user_id: 222, data: { id: '9001' } }, {})).outcome).toBe('chargeback_notified');
+    expect(t.messages.notify).toHaveBeenCalled();
+  });
+
   it('assinatura inválida é recusada; conta desconhecida e aviso que não é de ordem são ignorados', async () => {
     await expect(make({ sigOk: false }).svc.handle({}, body('111'), { signature: 'x' })).rejects.toThrow('Assinatura inválida');
     expect((await make().svc.handle({}, body('999'), {})).outcome).toBe('store_not_found');

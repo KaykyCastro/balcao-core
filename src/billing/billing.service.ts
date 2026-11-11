@@ -263,11 +263,14 @@ export class BillingService {
     let retry = '';
     if (invoice.checkoutUrl) {
       if (!invoice.preferenceId || !isOrderId(invoice.preferenceId)) return this.present(invoice);
-      const st = await this.mp.payment(invoice.preferenceId, this.mp.platformToken).then((x) => x.status).catch(() => '');
-      if (st !== 'rejected' && st !== 'cancelled') return this.present(invoice);
+      const old = await this.mp.payment(invoice.preferenceId, this.mp.platformToken).catch(() => null);
+      const st = old?.status ?? '';
+      // Em análise ou já paga: mantém (paga é confirmada pelo aviso). Criada sem pagamento, recusada ou cancelada: ordem nova.
+      if (st === 'approved' || st === 'in_process' || st === 'action_required') return this.present(invoice);
       retry = `-r${Date.now().toString(36)}`;
+      if (st !== 'cancelled') void this.mp.cancelCheckoutOrder(invoice.preferenceId, this.mp.platformToken);
       await this.invoiceModel.updateOne({ _id: invoice._id, checkoutUrl: invoice.checkoutUrl }, { $set: { checkoutUrl: null, preferenceId: null } });
-      this.logger.log(`Fatura ${String(invoice._id)}: ordem ${invoice.preferenceId} ${st}; criando outra`);
+      this.logger.warn(`Fatura ${String(invoice._id)}: ordem ${invoice.preferenceId} ${st} (motivo: ${old?.statusDetail || 'sem motivo'}, meio: ${old?.method ?? '?'}); criando outra`);
     }
 
     // Reserva atômica (30 s): dois cliques/abas não criam dois links.
@@ -302,6 +305,8 @@ export class BillingService {
         backUrl: `${front}/app/pagamento?fatura=${id}`,
         notificationUrl: api.startsWith('https://') ? `${api}/billing/webhook/mercadopago?i=${id}&s=${sign('invoice', id)}` : undefined,
         statementDescriptor: 'BALCAO ERP',
+        // O link vale 3 dias; depois disso, "Pagar" gera uma ordem nova (a antiga aparece como expirada).
+        expiresAt: new Date(Date.now() + 3 * 86_400_000),
       });
       const updated = await this.invoiceModel.findByIdAndUpdate(invoice._id, { $set: { checkoutUrl: pref.initPoint, preferenceId: pref.id } }, { returnDocument: 'after' });
       return this.present(updated!);
@@ -348,7 +353,11 @@ export class BillingService {
 
     const pay = await this.mp.payment(paymentId, this.mp.platformToken);
     if (pay.externalReference !== invoiceId) { this.logger.warn(`Pagamento ${paymentId} não é da fatura ${invoiceId}`); return 'not_this_invoice'; }
-    if (pay.status !== 'approved') return 'not_paid';
+    if (pay.status !== 'approved') {
+      if (pay.status === 'rejected' || pay.status === 'cancelled') this.logger.warn(`Fatura ${invoiceId}: pagamento ${paymentId} ${pay.status} (motivo: ${pay.statusDetail || 'sem motivo'}, meio: ${pay.method ?? '?'})`);
+      // Recusado/cancelado = 'not_paid' (a tela diz para tentar de novo); em análise ou sem pagamento ainda = 'pending'.
+      return pay.status === 'rejected' || pay.status === 'cancelled' ? 'not_paid' : 'pending';
+    }
     if (pay.amountCents < invoice.amountCents) {
       this.logger.error(`Valor divergente na fatura ${invoiceId}: esperado=${invoice.amountCents} pago=${pay.amountCents}`);
       return 'amount_mismatch';
@@ -427,6 +436,7 @@ export class BillingService {
         const from = inv.amountCents;
         inv.amountCents = amountCents;
         inv.note = note ?? inv.note;
+        if (inv.preferenceId && isOrderId(inv.preferenceId)) void this.mp.cancelCheckoutOrder(inv.preferenceId, this.mp.platformToken);
         inv.checkoutUrl = null; inv.preferenceId = null; inv.checkoutLockedAt = null;
         await inv.save({ session });
         await this.enterpriseService.addDebt(String(inv.enterpriseId), -(from - amountCents), session);

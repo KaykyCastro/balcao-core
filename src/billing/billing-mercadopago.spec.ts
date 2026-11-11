@@ -78,7 +78,7 @@ describe('BillingService – fatura paga pelo Mercado Pago', () => {
     await expect(hook(mk(inv({ status: 'cancelled' })).svc, sign('invoice', ID))).resolves.toMatchObject({ outcome: 'ignored' });
   });
   it('pagamento de outra fatura, pendente ou com valor menor não baixa', async () => {
-    for (const [p, out] of [[paid({ externalReference: 'outra' }), 'not_this_invoice'], [paid({ status: 'pending' }), 'not_paid'], [paid({ amountCents: 999 }), 'amount_mismatch']] as const) {
+    for (const [p, out] of [[paid({ externalReference: 'outra' }), 'not_this_invoice'], [paid({ status: 'pending' }), 'pending'], [paid({ status: 'rejected' }), 'not_paid'], [paid({ amountCents: 999 }), 'amount_mismatch']] as const) {
       const { svc, invoiceModel } = mk(inv(), p);
       await expect(hook(svc, sign('invoice', ID))).resolves.toMatchObject({ outcome: out });
       expect(invoiceModel.findOneAndUpdate).not.toHaveBeenCalled();
