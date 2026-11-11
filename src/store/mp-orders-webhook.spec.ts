@@ -12,14 +12,15 @@ function make(opts: { sigOk?: boolean; ref?: string; store?: any; order?: any; t
   const billing: any = { confirm: jest.fn(async () => 'applied') };
   const orders: any = { syncPayment: jest.fn(async () => 'applied') };
   const tabs: any = { syncPayment: jest.fn(async () => 'applied') };
-  const stores: any = { mpAccessToken: jest.fn(async () => 'LOJA') };
+  const stores: any = { mpAccessToken: jest.fn(async () => 'LOJA'), mpDisconnect: jest.fn(async () => ({})) };
+  const messages: any = { notify: jest.fn(async () => undefined) };
   const q = (v: any) => ({ select: () => ({ lean: async () => v }) });
   const storeModel: any = { findOne: jest.fn(() => q(opts.store ?? null)) };
   const orderModel: any = { findOne: jest.fn(async () => opts.order ?? null) };
   const tabModel: any = { findOne: jest.fn(async () => opts.tab ?? null) };
   const autopay: any = { webhook: jest.fn(async () => ({ received: true, outcome: 'synced' })) };
-  const svc = new MpOrdersWebhookService(mp, billing, autopay, orders, tabs, stores, storeModel, orderModel, tabModel);
-  return { svc, mp, billing, orders, tabs, stores, autopay, ref };
+  const svc = new MpOrdersWebhookService(mp, billing, autopay, orders, tabs, stores, messages, storeModel, orderModel, tabModel);
+  return { svc, mp, billing, orders, tabs, stores, autopay, messages, ref };
 }
 const body = (user: string) => ({ type: 'order', action: 'order.processed', user_id: user, data: { id: ORD } });
 
@@ -52,6 +53,16 @@ describe('webhook único das ordens (Checkout Pro via Orders)', () => {
     const t = make();
     expect((await t.svc.handle({}, { type: 'subscription_preapproval', data: { id: 'pre1' } }, {})).outcome).toBe('synced');
     expect(t.autopay.webhook).toHaveBeenCalled();
+  });
+
+  it('mp-connect: lojista tirou a permissão no Mercado Pago → loja desconectada e lojista avisado', async () => {
+    const store = { _id: new Types.ObjectId(), enterpriseId: new Types.ObjectId() };
+    const t = make({ store });
+    const r = await t.svc.handle({}, { type: 'mp-connect', action: 'application.deauthorized', user_id: 222, data: { id: '222' } }, {});
+    expect(r.outcome).toBe('disconnected');
+    expect(t.stores.mpDisconnect).toHaveBeenCalledWith(String(store.enterpriseId));
+    expect(t.messages.notify).toHaveBeenCalled();
+    expect((await make({ store }).svc.handle({}, { type: 'mp-connect', action: 'application.authorized', user_id: 222, data: { id: '222' } }, {})).outcome).toBe('noted');
   });
 
   it('assinatura inválida é recusada; conta desconhecida e aviso que não é de ordem são ignorados', async () => {

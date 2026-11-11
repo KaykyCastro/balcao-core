@@ -22,7 +22,7 @@ describe('Checkout Pro pela API de Orders', () => {
 
   it('consulta e reembolso de ordem usam /v1/orders', async () => {
     const calls: { url: string; method: string }[] = [];
-    global.fetch = jest.fn(async (url: string, init: any) => { calls.push({ url, method: init.method }); return { ok: true, status: 200, json: async () => ({ id: 'ORD01JQ4S4KY8HWQ6NA5PXB65B3D3', status: 'processed', status_detail: 'accredited', total_paid_amount: '10.00', user_id: 1 }) } as any; }) as any;
+    global.fetch = jest.fn(async (url: string, init: any) => { calls.push({ url, method: init.method }); return new Response(JSON.stringify({ id: 'ORD01JQ4S4KY8HWQ6NA5PXB65B3D3', status: 'processed', status_detail: 'accredited', total_paid_amount: '10.00', user_id: 1 }), { status: 200, headers: { 'content-type': 'application/json' } }); }) as any;
     const mp = new MercadoPagoClient(new ConfigService({}));
     const p = await mp.payment('ORD01JQ4S4KY8HWQ6NA5PXB65B3D3', 'T');
     expect(p.status).toBe('approved');

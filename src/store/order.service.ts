@@ -212,7 +212,7 @@ export class OrderService {
             ...order.items.map((i) => ({ title: i.productName, quantity: i.quantity, unitCents: i.unitPriceCents })),
             ...(order.shipping.priceCents > 0 ? [{ title: `Frete - ${order.shipping.name}`, quantity: 1, unitCents: order.shipping.priceCents }] : []),
           ],
-        payer: { name: order.customer.name, email: order.customer.email, phone: order.customer.phone, document: order.customer.document, address: order.address },
+        payer: { name: order.customer.name, email: order.customer.email, phone: order.customer.phone, document: order.customer.document, address: order.address, registeredAt: await this.customerSince(order) },
         maxInstallments: store.theme?.installments ?? 0,
         backUrl: `${this.front}/loja/${store.slug}/pedido/${oid}?t=${token}`,
         notificationUrl: this.api.startsWith('https://') ? `${this.api}/public/store-webhook/mercadopago?o=${oid}&s=${sign(SCOPE, oid)}` : undefined,
@@ -246,6 +246,15 @@ export class OrderService {
     const o = await this.byToken(slug, id, p.t);
     const outcome = await this.syncPayment(o, p.paymentId);
     return { outcome, order: this.present((await this.orders.findById(o._id))!, true) };
+  }
+
+  /** Data de cadastro do cliente na loja (vai para o Mercado Pago como registration_date). Dado extra: nunca derruba o checkout. */
+  private async customerSince(o: { enterpriseId: unknown; customerId?: unknown }): Promise<Date | null> {
+    if (!o.customerId) return null;
+    try {
+      const c = await this.customers.getCustomerById(String(o.enterpriseId), String(o.customerId));
+      return (c as { createdAt?: Date } | null)?.createdAt ?? null;
+    } catch { return null; }
   }
 
   /** Webhook do Mercado Pago (URL com token por pedido + consulta do pagamento na conta do lojista). */

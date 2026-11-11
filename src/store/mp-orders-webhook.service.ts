@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { AutopayService } from '../billing/autopay.service';
 import { BillingService } from '../billing/billing.service';
+import { MessagesService } from '../messages/messages.service';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
 import { MercadoPagoClient, isOrderId } from '../mercadopago/mercadopago.client';
 import { Order } from './schema/order.schema';
@@ -34,6 +35,7 @@ export class MpOrdersWebhookService {
     private readonly orders: OrderService,
     private readonly tabs: TabService,
     private readonly stores: StoreService,
+    private readonly messages: MessagesService,
     @InjectModel(Store.name) storeModel: Model<Store>,
     @InjectModel(Order.name) orderModel: Model<Order>,
     @InjectModel(Tab.name) tabModel: Model<Tab>,
@@ -52,11 +54,33 @@ export class MpOrdersWebhookService {
     return this.platformUser;
   }
 
+  /**
+   * Vinculação OAuth (tópico mp-connect): quando o lojista tira a permissão do Balcão pelo próprio Mercado Pago
+   * (application.deauthorized), a loja é desconectada na hora (e desligada, como em "Desconectar") e o lojista é avisado.
+   * A vinculação (application.authorized) só fica registrada: quem conclui a conexão é a volta do OAuth.
+   */
+  private async connect(body: Record<string, any>, headers: { signature?: string; requestId?: string }) {
+    const userId = String(body?.user_id ?? body?.data?.id ?? '');
+    if (!/^\d{1,20}$/.test(userId)) return { received: true, outcome: 'ignored' };
+    if (!this.mp.verifySignature(String(body?.data?.id ?? userId), headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
+    if (body?.action !== 'application.deauthorized') return { received: true, outcome: 'noted' };
+    const store = await this.storeModel.findOne({ 'mp.userId': userId }).select('_id enterpriseId').lean();
+    if (!store) return { received: true, outcome: 'store_not_found' };
+    await this.stores.mpDisconnect(String(store.enterpriseId));
+    await this.messages.notify(store.enterpriseId as never, {
+      title: 'Mercado Pago desconectado', level: 'warning', link: '/app/loja?aba=pagamento',
+      body: 'A permissão do Balcão foi retirada na sua conta do Mercado Pago, então a loja online foi desligada para não aceitar pedidos que não teriam como ser pagos. Para voltar a vender, conecte o Mercado Pago de novo em Loja online → Pagamento.',
+    }).catch(() => undefined);
+    this.logger.log(`Conta ${userId} retirou a permissão: loja ${String(store.enterpriseId)} desconectada`);
+    return { received: true, outcome: 'disconnected' };
+  }
+
   async handle(q: Record<string, unknown>, body: Record<string, any>, headers: { signature?: string; requestId?: string }) {
     const type = String(body?.type ?? q.type ?? q.topic ?? '');
     // O painel tem um endereço só por aplicação: os avisos da assinatura no cartão (cobrança automática das faturas)
     // também chegam aqui e seguem para o mesmo tratamento de antes.
     if (type === 'subscription_preapproval' || type === 'subscription_authorized_payment') return this.autopay.webhook(q, body, headers);
+    if (type === 'mp-connect') return this.connect(body, headers);
     const id = String(body?.data?.id ?? q['data.id'] ?? '');
     if (type !== 'order' || !isOrderId(id)) return { received: true, outcome: 'ignored' };
     if (!this.mp.verifySignature(id, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');

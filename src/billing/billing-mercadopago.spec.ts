@@ -3,7 +3,7 @@ import { BillingService } from './billing.service';
 import { MercadoPagoClient } from '../mercadopago/mercadopago.client';
 import { sign } from '../common/secret-box';
 
-const okJson = (body: unknown, status = 200) => Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) } as Response);
+const okJson = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 
 describe('MercadoPagoClient', () => {
   afterEach(() => jest.restoreAllMocks());

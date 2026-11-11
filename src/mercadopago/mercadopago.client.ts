@@ -1,4 +1,5 @@
 import { BadGatewayException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { MercadoPagoConfig, MercadoPagoError, Order as MpOrderClient } from 'mercadopago';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
 
@@ -12,7 +13,7 @@ export interface MpPreferenceInput {
   /** Comissão do Balcão (loja online). Ausente/0 = sem comissão (faturas do sistema). */
   marketplaceFeeCents?: number;
   /** `document`: CPF (11) ou CNPJ (14) só com números; endereço quando houver entrega. */
-  payer: { name: string; email?: string; phone?: string; document?: string; address?: { cep: string; street: string; number: string } | null };
+  payer: { name: string; email?: string; phone?: string; document?: string; address?: { cep: string; street: string; number: string } | null; registeredAt?: Date | null };
   /** Máximo de parcelas no cartão (as que a loja oferece). */
   maxInstallments?: number;
   /** Chave de idempotência própria (padrão: pref-<orderId>). Comanda reaberta gera outra cobrança. */
@@ -226,6 +227,28 @@ export class MercadoPagoClient {
 
   /** Checkout Pro na conta do lojista, com a comissão do Balcão (marketplace_fee) separada automaticamente. */
   /**
+   * SDK oficial do Mercado Pago (backend) para as ordens do Checkout Pro: criar, consultar e devolver. Leva o
+   * MP_PLATFORM_ID (x-platform-id) quando definido e repete sozinho só em erro temporário (5xx/429), com a mesma chave
+   * de idempotência. Os erros viram as mesmas mensagens do resto do Balcão.
+   */
+  private sdkOrders(accessToken: string) {
+    const platformId = this.config.get<string>('MP_PLATFORM_ID')?.trim();
+    return new MpOrderClient(new MercadoPagoConfig({ accessToken, options: { timeout: 15_000, maxRetries: 2, retryOn: [429, 500, 502, 503, 504], ...(platformId ? { platformId } : {}) } }));
+  }
+  private async sdk<T>(path: string, run: () => Promise<T>): Promise<T> {
+    try { return await run(); }
+    catch (e) {
+      if (e instanceof MercadoPagoError) {
+        this.logger.error(`Mercado Pago ${e.status} em ${path}: ${String(e.message).slice(0, 400)}`);
+        if (e.status === 401) throw new BadGatewayException('A conexão com o Mercado Pago expirou. Conecte a conta de novo em Loja online → Pagamento.');
+        throw new BadGatewayException(`O Mercado Pago recusou a requisição (${e.status})`);
+      }
+      this.logger.error(`Mercado Pago sem resposta (${path}): ${(e as Error).message}`);
+      throw new BadGatewayException('Não foi possível falar com o Mercado Pago');
+    }
+  }
+
+  /**
    * Cobrança de Checkout Pro pela API de Orders (o modelo da aplicação certificada): POST /v1/orders com type "online" e
    * processing_mode "manual"; o comprador paga no `checkout_url`. O id devolvido é o da ordem ("ORD…"): é com ele que
    * `payment()` confere e `refund()` devolve. Os avisos chegam no webhook único do painel (evento Order), não por cobrança.
@@ -253,6 +276,8 @@ export class MercadoPagoClient {
       items: items.map((i) => ({ title: i.title, unit_price: money(i.unitCents), quantity: i.quantity, description: i.description, category_id: i.categoryId, external_code: i.code })),
       ...(p.payer.email ? { payer: orderPayerOf(p.payer) } : {}),
       ...(minutes ? { expiration_time: `PT${minutes}M` } : {}), // Pix gerado vence junto com a reserva
+      // Data de cadastro do pagador no Balcão (ajuda a aprovação): conta do lojista nas faturas, cadastro do cliente nos pedidos.
+      ...(p.payer.registeredAt ? { additional_info: { payer: { registration_date: new Date(p.payer.registeredAt).toISOString() } } } : {}),
       config: {
         ...(descriptor ? { statement_descriptor: descriptor } : {}),
         online: { ...online, transaction_security: { validation: 'on_fraud_risk', liability_shift: 'required' } },
@@ -261,11 +286,12 @@ export class MercadoPagoClient {
     };
     const idem = p.idem ?? `pref-${p.orderId}`;
     let r: Record<string, unknown>;
-    try { r = await this.call<Record<string, unknown>>('POST', '/v1/orders', full, p.accessToken, idem); }
+    const create = (body: Record<string, unknown>, key: string) => this.sdk('/v1/orders', () => this.sdkOrders(p.accessToken).create({ body: body as never, requestOptions: { idempotencyKey: key } }) as Promise<unknown>) as Promise<Record<string, unknown>>;
+    try { r = await create(full, idem); }
     catch (e) {
       if (!(e instanceof BadGatewayException) || !/\((400|422)\)/.test(e.message)) throw e;
       this.logger.warn(`Ordem de checkout recusada com os campos opcionais; tentando só com o essencial: ${e.message}`);
-      r = await this.call<Record<string, unknown>>('POST', '/v1/orders', minimal, p.accessToken, `${idem}-b`);
+      r = await create(minimal, `${idem}-b`);
     }
     const initPoint = String(r.checkout_url ?? '');
     if (!/^https:\/\//.test(initPoint)) throw new BadGatewayException('O Mercado Pago não devolveu o link de pagamento');
@@ -304,7 +330,7 @@ export class MercadoPagoClient {
 
   /** Consulta o pagamento direto no Mercado Pago (fonte da verdade; nunca confie no webhook ou no redirecionamento). */
   async payment(id: string, accessToken: string): Promise<MpPayment> {
-    if (isOrderId(id)) return orderAsPayment(await this.call<Record<string, any>>('GET', `/v1/orders/${encodeURIComponent(id)}`, undefined, accessToken));
+    if (isOrderId(id)) return orderAsPayment(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>) as Record<string, any>);
     const r = await this.call<Record<string, any>>('GET', `/v1/payments/${encodeURIComponent(id)}`, undefined, accessToken);
     const fee = Array.isArray(r.fee_details) ? r.fee_details.filter((f: any) => f?.type === 'application_fee').reduce((s: number, f: any) => s + cents(f.amount), 0) : 0;
     return {
@@ -316,7 +342,7 @@ export class MercadoPagoClient {
 
   /** Devolve o pagamento inteiro ao comprador (a comissão do marketplace volta junto). */
   async refund(paymentId: string, accessToken: string, idem: string): Promise<void> {
-    if (isOrderId(paymentId)) { await this.call('POST', `/v1/orders/${encodeURIComponent(paymentId)}/refund`, {}, accessToken, idem); return; }
+    if (isOrderId(paymentId)) { await this.sdk(`/v1/orders/${paymentId}/refund`, () => this.sdkOrders(accessToken).refund({ id: paymentId, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>); return; }
     await this.call('POST', `/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {}, accessToken, idem);
   }
 

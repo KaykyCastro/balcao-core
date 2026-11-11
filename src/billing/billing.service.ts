@@ -266,6 +266,8 @@ export class BillingService {
     }
 
     const enterprise = await this.enterpriseService.findEnterpriseById(enterpriseId);
+    // CPF/CNPJ do pagador: o da empresa, senão o informado nos dados do vendedor da loja online (melhora a aprovação).
+    const sellerDoc = String(((await this.connection.models.Store?.findOne({ enterpriseId: enterprise._id }).select('legal.document').lean()) as { legal?: { document?: string } } | null)?.legal?.document ?? '');
     const id = String(invoice._id);
     const api = (this.config.get<string>('APP_URL') ?? '').replace(/\/$/, '');
     const front = (this.config.get<string>('FRONTEND_URL') ?? '').replace(/\/$/, '');
@@ -274,7 +276,7 @@ export class BillingService {
         accessToken: this.mp.platformToken,
         orderId: id,
         items: [{ title: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`, description: 'Taxa mensal de uso do sistema de vendas Balcão ERP', categoryId: 'services', quantity: 1, unitCents: invoice.amountCents }],
-        payer: { name: enterprise.name, email: enterprise.email, document: enterprise.cnpj },
+        payer: { name: enterprise.name, email: enterprise.email, document: enterprise.cnpj || sellerDoc, registeredAt: (enterprise as { createdAt?: Date }).createdAt ?? null },
         backUrl: `${front}/app/pagamento?fatura=${id}`,
         notificationUrl: api.startsWith('https://') ? `${api}/billing/webhook/mercadopago?i=${id}&s=${sign('invoice', id)}` : undefined,
         statementDescriptor: 'BALCAO ERP',

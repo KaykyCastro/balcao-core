@@ -14,8 +14,8 @@ describe('Mercado Pago: itens de qualidade da integração', () => {
     let fail = 0;
     global.fetch = jest.fn(async (_url: string, init: any) => {
       calls.push({ body: JSON.parse(init.body), headers: init.headers });
-      if (fail-- > 0) return { ok: false, status: 400, json: async () => ({ message: 'invalid config' }) } as any;
-      return { ok: true, status: 201, json: async () => ({ id: 'ORD1', status: 'action_required', transactions: { payments: [{ payment_method: { qr_code: 'x' } }] } }) } as any;
+      if (fail-- > 0) return new Response(JSON.stringify({ message: 'invalid config' }), { status: 400, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ id: 'ORD1', status: 'action_required', transactions: { payments: [{ payment_method: { qr_code: 'x' } }] } }), { status: 201, headers: { 'content-type': 'application/json' } });
     }) as any;
     return { mp, calls, failNext: (n: number) => { fail = n; } };
   };
@@ -62,7 +62,7 @@ describe('Checkout Pro: itens de qualidade', () => {
 
   it('checkout vira ordem (API de Orders): itens, pagador, nome na fatura, parcelas, sem boleto, URLs de retorno', async () => {
     let body: any; let url = '';
-    global.fetch = jest.fn(async (u: string, init: any) => { url = u; body = JSON.parse(init.body); return { ok: true, status: 201, json: async () => ({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://www.mercadopago.com.br/checkout/v1/redirect?order_id=ORD01ABCDEFGHIJKLMN' }) } as any; }) as any;
+    global.fetch = jest.fn(async (u: string, init: any) => { url = u; body = JSON.parse(init.body); return new Response(JSON.stringify({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://www.mercadopago.com.br/checkout/v1/redirect?order_id=ORD01ABCDEFGHIJKLMN' }), { status: 201, headers: { 'content-type': 'application/json' } }); }) as any;
     const mp = new MercadoPagoClient(new ConfigService({}));
     const r = await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Batom', quantity: 2, unitCents: 1990 }], payer: { name: 'Ana Souza', email: 'a@x.com', document: '12345678909' }, backUrl: 'https://x/y', statementDescriptor: 'Pele Boa Cosméticos', maxInstallments: 6, marketplaceFeeCents: 120 });
     expect(url).toMatch(/\/v1\/orders$/);
@@ -79,7 +79,7 @@ describe('Checkout Pro: itens de qualidade', () => {
     const bodies: any[] = [];
     global.fetch = jest.fn(async (_u: string, init: any) => {
       bodies.push(JSON.parse(init.body));
-      return bodies.length === 1 ? { ok: false, status: 400, json: async () => ({ message: 'invalid' }) } as any : { ok: true, status: 201, json: async () => ({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://mp/x' }) } as any;
+      return bodies.length === 1 ? new Response(JSON.stringify({ message: 'invalid' }), { status: 400, headers: { 'content-type': 'application/json' } }) : new Response(JSON.stringify({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://mp/x' }), { status: 201, headers: { 'content-type': 'application/json' } });
     }) as any;
     const mp = new MercadoPagoClient(new ConfigService({}));
     await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Taxa', quantity: 1, unitCents: 500 }], payer: { name: 'Mesa 4' }, backUrl: 'https://x/y' });
