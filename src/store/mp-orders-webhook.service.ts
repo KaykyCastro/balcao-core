@@ -98,7 +98,20 @@ export class MpOrdersWebhookService {
     return { received: true, outcome: 'chargeback_notified' };
   }
 
+  /** Recebe qualquer aviso do painel e registra no log o tipo, a ação, a conta e o resultado (sem dado pessoal). */
   async handle(q: Record<string, unknown>, body: Record<string, any>, headers: { signature?: string; requestId?: string }) {
+    const tag = `Aviso do Mercado Pago ${String(body?.type ?? q.type ?? q.topic ?? '?')}/${String(body?.action ?? '-')} (conta ${String(body?.user_id ?? '?')}, id ${String(body?.data?.id ?? q['data.id'] ?? '?').slice(0, 40)})`;
+    try {
+      const r = await this.route(q, body, headers);
+      this.logger.log(`${tag}: ${(r as { outcome?: string }).outcome ?? 'ok'}`);
+      return r;
+    } catch (e) {
+      this.logger.warn(`${tag}: ${(e as Error).message}`);
+      throw e;
+    }
+  }
+
+  private async route(q: Record<string, unknown>, body: Record<string, any>, headers: { signature?: string; requestId?: string }) {
     const type = String(body?.type ?? q.type ?? q.topic ?? '');
     // O painel tem um endereço só por aplicação: os avisos da assinatura no cartão (cobrança automática das faturas)
     // também chegam aqui e seguem para o mesmo tratamento de antes.

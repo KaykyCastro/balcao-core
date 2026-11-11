@@ -308,6 +308,8 @@ export class BillingService {
         // O link vale 3 dias; depois disso, "Pagar" gera uma ordem nova (a antiga aparece como expirada).
         expiresAt: new Date(Date.now() + 3 * 86_400_000),
       });
+      // Diagnóstico sem dado pessoal: se o pagador foi junto na ordem e, se não, por quê.
+      this.logger.log(`Fatura ${id}: ordem ${pref.id}; pagador ${selfPay ? 'NÃO enviado (e-mail da conta do lojista = e-mail da conta que recebe)' : enterprise.email ? `enviado (documento: ${enterprise.cnpj || sellerDoc ? 'sim' : 'não'})` : 'NÃO enviado (conta sem e-mail)'}`);
       const updated = await this.invoiceModel.findByIdAndUpdate(invoice._id, { $set: { checkoutUrl: pref.initPoint, preferenceId: pref.id } }, { returnDocument: 'after' });
       return this.present(updated!);
     } catch (e) {
