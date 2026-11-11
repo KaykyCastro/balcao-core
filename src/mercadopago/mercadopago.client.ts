@@ -136,9 +136,13 @@ export class MercadoPagoClient {
   }
 
   /** Link para o lojista autorizar o Balcão na conta Mercado Pago dele. */
-  authUrl(state: string): string {
+  /**
+   * Link de autorização. Com `codeChallenge` usa PKCE (S256): funciona com o PKCE ligado ou desligado na aplicação do
+   * Mercado Pago. Ligado, o Mercado Pago recusa o link sem code_challenge antes mesmo do login ("o aplicativo não está pronto").
+   */
+  authUrl(state: string, codeChallenge?: string): string {
     const { clientId, redirectUri } = this.app();
-    const q = new URLSearchParams({ client_id: clientId, response_type: 'code', platform_id: 'mp', state, redirect_uri: redirectUri });
+    const q = new URLSearchParams({ client_id: clientId, response_type: 'code', platform_id: 'mp', state, redirect_uri: redirectUri, ...(codeChallenge ? { code_challenge: codeChallenge, code_challenge_method: 'S256' } : {}) });
     return `${AUTH}?${q}`;
   }
 
@@ -150,9 +154,9 @@ export class MercadoPagoClient {
     };
   }
 
-  async exchangeCode(code: string): Promise<MpTokens> {
+  async exchangeCode(code: string, codeVerifier?: string): Promise<MpTokens> {
     const { clientId, clientSecret, redirectUri } = this.app();
-    return this.tokens(await this.call<Record<string, unknown>>('POST', '/oauth/token', { client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: redirectUri }));
+    return this.tokens(await this.call<Record<string, unknown>>('POST', '/oauth/token', { client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: redirectUri, ...(codeVerifier ? { code_verifier: codeVerifier } : {}) }));
   }
 
   async refresh(refreshToken: string): Promise<MpTokens> {

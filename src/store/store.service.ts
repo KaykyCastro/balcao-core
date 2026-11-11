@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { StorageService } from '../storage/storage.service';
 import { removedUrls } from '../storage/storage.rules';
 import { CodeService } from './code/code.service';
@@ -30,6 +31,13 @@ function storeImages(s: { logo?: string; banner?: string; slides?: { image?: str
 
 /** Campos que só mudam a aparência da loja: salvar só eles não refaz a checagem de "pode ficar no ar". */
 const LOOK_ONLY = ['theme', 'tagline', 'about', 'logo', 'banner', 'notice', 'slides', 'reels', 'reelsTitle', 'highlights', 'seo'] as const;
+
+/**
+ * PKCE do OAuth do Mercado Pago sem guardar nada: o code_verifier sai do `state` (já assinado) com a chave secreta do
+ * servidor, então só a API consegue refazê-lo na volta. 64 caracteres base64url (o padrão pede de 43 a 128).
+ */
+export const pkceVerifier = (state: string) => sign('mp-pkce-a', state) + sign('mp-pkce-b', state);
+export const pkceChallenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
 
 @Injectable()
 export class StoreService {
@@ -253,14 +261,14 @@ export class StoreService {
   async mpConnectUrl(enterpriseId: string) {
     const exp = Date.now() + 15 * 60_000;
     const state = `${enterpriseId}.${exp}.${sign('mp-oauth', `${enterpriseId}.${exp}`)}`;
-    return { url: this.mp.authUrl(state) };
+    return { url: this.mp.authUrl(state, pkceChallenge(pkceVerifier(state))) };
   }
 
   async mpCallback(enterpriseId: string, code: string, state: string) {
     const [eid, exp, sig] = String(state).split('.');
     if (eid !== enterpriseId || !verifySigned('mp-oauth', `${eid}.${exp}`, sig) || Number(exp) < Date.now()) throw new UnprocessableEntityException('Conexão expirada ou inválida. Clique em “Conectar Mercado Pago” de novo.');
     const store = await this.getOrCreate(enterpriseId);
-    const t = await this.mp.exchangeCode(code);
+    const t = await this.mp.exchangeCode(code, pkceVerifier(state));
     const me = await this.mp.me(t.accessToken).catch(() => ({ id: t.userId, nickname: '', email: '' }));
     await this.stores.updateOne({ _id: store._id }, { $set: { mp: {
       userId: t.userId || me.id, nickname: me.nickname, email: me.email, publicKey: t.publicKey,
