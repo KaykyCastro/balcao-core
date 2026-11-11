@@ -7,10 +7,14 @@ export interface MpPreferenceInput {
   accessToken: string;
   /** Vai em `external_reference`: id do pedido ou da fatura. Também compõe a chave de idempotência. */
   orderId: string;
-  items: { title: string; quantity: number; unitCents: number }[];
+  /** `categoryId`: categoria do Mercado Pago (ex.: services, others); `description`: texto do item (padrão: o título). */
+  items: { title: string; quantity: number; unitCents: number; description?: string; categoryId?: string }[];
   /** Comissão do Balcão (loja online). Ausente/0 = sem comissão (faturas do sistema). */
   marketplaceFeeCents?: number;
-  payer: { name: string; email?: string; phone?: string };
+  /** `document`: CPF (11) ou CNPJ (14) só com números; endereço quando houver entrega. */
+  payer: { name: string; email?: string; phone?: string; document?: string; address?: { cep: string; street: string; number: string } | null };
+  /** Máximo de parcelas no cartão (as que a loja oferece). */
+  maxInstallments?: number;
   /** Chave de idempotência própria (padrão: pref-<orderId>). Comanda reaberta gera outra cobrança. */
   idem?: string;
   backUrl: string;
@@ -69,6 +73,23 @@ function preapproval(r: Record<string, any>): MpPreapproval {
 /** Texto da fatura do cartão: sem acento, só letras, números e espaço, até 22 caracteres (limite das bandeiras). */
 export function statementDescriptorOf(name?: string | null): string {
   return (name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 22).trim().toUpperCase();
+}
+
+/**
+ * Pagador do Checkout Pro com o que a avaliação de qualidade pede: nome e sobrenome separados, e-mail, telefone,
+ * CPF/CNPJ e endereço (quando houver). Só vai o que existe; nada é inventado.
+ */
+export function payerOf(p: MpPreferenceInput['payer']) {
+  const parts = p.name.trim().split(/\s+/);
+  const doc = (p.document ?? '').replace(/\D/g, '');
+  const phone = (p.phone ?? '').replace(/\D/g, '');
+  return {
+    name: parts[0] ?? '', ...(parts.length > 1 ? { surname: parts.slice(1).join(' ') } : {}),
+    ...(p.email ? { email: p.email } : {}),
+    ...(phone.length >= 10 ? { phone: { area_code: phone.slice(0, 2), number: phone.slice(2) } } : {}),
+    ...(doc.length === 11 || doc.length === 14 ? { identification: { type: doc.length === 11 ? 'CPF' : 'CNPJ', number: doc } } : {}),
+    ...(p.address?.cep ? { address: { zip_code: p.address.cep.replace(/\D/g, ''), street_name: p.address.street, street_number: p.address.number } } : {}),
+  };
 }
 
 @Injectable()
@@ -172,8 +193,11 @@ export class MercadoPagoClient {
   /** Checkout Pro na conta do lojista, com a comissão do Balcão (marketplace_fee) separada automaticamente. */
   async createPreference(p: MpPreferenceInput): Promise<{ id: string; initPoint: string }> {
     const r = await this.call<Record<string, unknown>>('POST', '/checkout/preferences', {
-      items: p.items.map((i, k) => ({ id: String(k + 1), title: i.title.slice(0, 250), quantity: i.quantity, unit_price: i.unitCents / 100, currency_id: 'BRL' })),
-      payer: { name: p.payer.name, ...(p.payer.email ? { email: p.payer.email } : {}), ...(p.payer.phone ? { phone: { area_code: p.payer.phone.slice(0, 2), number: p.payer.phone.slice(2) } } : {}) },
+      items: p.items.map((i, k) => ({
+        id: String(k + 1), title: i.title.slice(0, 250), description: (i.description ?? i.title).slice(0, 250), category_id: i.categoryId ?? 'others',
+        quantity: i.quantity, unit_price: i.unitCents / 100, currency_id: 'BRL',
+      })),
+      payer: payerOf(p.payer),
       external_reference: p.orderId,
       ...(p.marketplaceFeeCents ? { marketplace_fee: p.marketplaceFeeCents / 100 } : {}),
       back_urls: { success: p.backUrl, pending: p.backUrl, failure: p.backUrl },
@@ -184,8 +208,8 @@ export class MercadoPagoClient {
         expiration_date_to: p.expiresAt.toISOString(),
         date_of_expiration: p.expiresAt.toISOString(), // Pix gerado vence junto com a reserva
       } : {}),
-      ...(p.statementDescriptor ? { statement_descriptor: p.statementDescriptor.slice(0, 22) } : {}),
-      payment_methods: { excluded_payment_types: [{ id: 'ticket' }] }, // sem boleto: demora a compensar e a reserva expira
+      ...(statementDescriptorOf(p.statementDescriptor) ? { statement_descriptor: statementDescriptorOf(p.statementDescriptor) } : {}),
+      payment_methods: { excluded_payment_types: [{ id: 'ticket' }], ...(p.maxInstallments && p.maxInstallments > 0 ? { installments: Math.min(12, p.maxInstallments) } : {}) }, // sem boleto: demora a compensar e a reserva expira
     }, p.accessToken, p.idem ?? `pref-${p.orderId}`);
     const initPoint = String(r.init_point ?? '');
     if (!/^https:\/\//.test(initPoint)) throw new BadGatewayException('O Mercado Pago não devolveu o link de pagamento');

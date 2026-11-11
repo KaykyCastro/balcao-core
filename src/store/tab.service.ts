@@ -313,7 +313,7 @@ export class TabService {
     const accessToken = await this.stores.mpAccessToken(store._id);
     const live = tab.items.filter((i) => i.status !== 'cancelled');
     const pref = await this.mp.createPreference({
-      accessToken, orderId: oid, idem: `tab-${oid}-${tab.payment.attempt}`, statementDescriptor: store.name,
+      accessToken, orderId: oid, idem: `tab-${oid}-${tab.payment.attempt}`, statementDescriptor: store.name, maxInstallments: store.theme?.installments ?? 0,
       items: [
         ...live.map((i) => ({ title: i.productName, quantity: i.quantity, unitCents: i.unitPriceCents })),
         ...(tab.serviceCents > 0 ? [{ title: 'Taxa de serviço', quantity: 1, unitCents: tab.serviceCents }] : []),

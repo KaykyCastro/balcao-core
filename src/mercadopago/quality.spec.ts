@@ -47,3 +47,29 @@ describe('Mercado Pago: itens de qualidade da integração', () => {
     expect(t.calls[1].headers['X-Idempotency-Key']).toBe('i1-b');
   });
 });
+
+import { payerOf } from './mercadopago.client';
+describe('Checkout Pro: itens de qualidade', () => {
+  it('pagador: nome e sobrenome separados, CPF/CNPJ, telefone e endereço só quando existem', () => {
+    expect(payerOf({ name: 'Ana Maria Souza', email: 'a@x.com', phone: '(85) 99999-0000', document: '123.456.789-09', address: { cep: '60000-000', street: 'Rua A', number: '10' } })).toEqual({
+      name: 'Ana', surname: 'Maria Souza', email: 'a@x.com', phone: { area_code: '85', number: '999990000' },
+      identification: { type: 'CPF', number: '12345678909' }, address: { zip_code: '60000000', street_name: 'Rua A', street_number: '10' },
+    });
+    expect(payerOf({ name: 'Bella Moda', document: '12345678000190' }).identification).toEqual({ type: 'CNPJ', number: '12345678000190' });
+    expect(payerOf({ name: 'Mesa 4' })).toEqual({ name: 'Mesa', surname: '4' });
+    expect(payerOf({ name: 'Ana', document: '123' }).identification).toBeUndefined();
+  });
+
+  it('preferência leva categoria e descrição do item, nome na fatura sem acento e o limite de parcelas', async () => {
+    let body: any;
+    global.fetch = jest.fn(async (_u: string, init: any) => { body = JSON.parse(init.body); return { ok: true, status: 201, json: async () => ({ id: 'P1', init_point: 'https://mp/x' }) } as any; }) as any;
+    const mp = new MercadoPagoClient(new ConfigService({}));
+    await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Batom', quantity: 2, unitCents: 1990 }], payer: { name: 'Ana Souza', email: 'a@x.com' }, backUrl: 'https://x/y', statementDescriptor: 'Pele Boa Cosméticos', maxInstallments: 6 });
+    expect(body.items[0]).toMatchObject({ id: '1', title: 'Batom', description: 'Batom', category_id: 'others', quantity: 2, unit_price: 19.9 });
+    expect(body.statement_descriptor).toBe('PELE BOA COSMETICOS');
+    expect(body.payment_methods.installments).toBe(6);
+    expect(body.payer).toMatchObject({ name: 'Ana', surname: 'Souza', email: 'a@x.com' });
+    expect(body.back_urls.success).toBe('https://x/y');
+    expect(body.external_reference).toBe('o1');
+  });
+});

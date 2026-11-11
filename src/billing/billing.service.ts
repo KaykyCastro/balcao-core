@@ -272,8 +272,8 @@ export class BillingService {
       const pref = await this.mp.createPreference({
         accessToken: this.mp.platformToken,
         orderId: id,
-        items: [{ title: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`, quantity: 1, unitCents: invoice.amountCents }],
-        payer: { name: enterprise.name, email: enterprise.email },
+        items: [{ title: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`, description: 'Taxa mensal de uso do sistema de vendas Balcão ERP', categoryId: 'services', quantity: 1, unitCents: invoice.amountCents }],
+        payer: { name: enterprise.name, email: enterprise.email, document: enterprise.cnpj },
         backUrl: `${front}/app/pagamento?fatura=${id}`,
         notificationUrl: api.startsWith('https://') ? `${api}/billing/webhook/mercadopago?i=${id}&s=${sign('invoice', id)}` : undefined,
         statementDescriptor: 'BALCAO ERP',
