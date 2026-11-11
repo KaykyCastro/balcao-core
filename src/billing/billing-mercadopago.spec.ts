@@ -34,7 +34,7 @@ describe('MercadoPagoClient', () => {
     f.mockRejectedValue(new Error('boom'));
     await expect(c.payment('1', 'x')).rejects.toMatchObject({ status: 502 });
     expect(() => mk({ MP_ACCESS_TOKEN: '' }).platformToken).toThrow(/MP_ACCESS_TOKEN/);
-  });
+  }, 30_000); // falha de rede: o SDK tenta de novo (com espera) antes de desistir
 
   it('lê o pagamento: valor, status, referência e comissão em centavos', async () => {
     jest.spyOn(global, 'fetch').mockImplementation(() => okJson({ id: 77, status: 'approved', external_reference: 'inv1', transaction_amount: 40, collector_id: 9, payment_type_id: 'bank_transfer', fee_details: [{ type: 'application_fee', amount: 0.6 }, { type: 'mercadopago_fee', amount: 0.4 }] }));

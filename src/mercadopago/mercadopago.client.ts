@@ -1,5 +1,5 @@
 import { BadGatewayException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
-import { MercadoPagoConfig, MercadoPagoError, Order as MpOrderClient } from 'mercadopago';
+import { MercadoPagoConfig, MercadoPagoError, Order as MpOrderClient, Payment as MpPaymentClient, PaymentRefund as MpRefundClient, User as MpUserClient } from 'mercadopago';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
 
@@ -221,7 +221,7 @@ export class MercadoPagoClient {
   }
 
   async me(accessToken: string): Promise<{ id: string; nickname: string; email: string }> {
-    const r = await this.call<Record<string, unknown>>('GET', '/users/me', undefined, accessToken);
+    const r = await this.sdk('/users/me', () => new MpUserClient(this.sdkConfig(accessToken)).get() as Promise<unknown>) as Record<string, unknown>;
     return { id: String(r.id ?? ''), nickname: String(r.nickname ?? ''), email: String(r.email ?? '') };
   }
 
@@ -231,10 +231,11 @@ export class MercadoPagoClient {
    * MP_PLATFORM_ID (x-platform-id) quando definido e repete sozinho só em erro temporário (5xx/429), com a mesma chave
    * de idempotência. Os erros viram as mesmas mensagens do resto do Balcão.
    */
-  private sdkOrders(accessToken: string) {
+  private sdkConfig(accessToken: string) {
     const platformId = this.config.get<string>('MP_PLATFORM_ID')?.trim();
-    return new MpOrderClient(new MercadoPagoConfig({ accessToken, options: { timeout: 15_000, maxRetries: 2, retryOn: [429, 500, 502, 503, 504], ...(platformId ? { platformId } : {}) } }));
+    return new MercadoPagoConfig({ accessToken, options: { timeout: 15_000, maxRetries: 2, retryOn: [429, 500, 502, 503, 504], ...(platformId ? { platformId } : {}) } });
   }
+  private sdkOrders(accessToken: string) { return new MpOrderClient(this.sdkConfig(accessToken)); }
   private async sdk<T>(path: string, run: () => Promise<T>): Promise<T> {
     try { return await run(); }
     catch (e) {
@@ -362,7 +363,8 @@ export class MercadoPagoClient {
   /** Consulta o pagamento direto no Mercado Pago (fonte da verdade; nunca confie no webhook ou no redirecionamento). */
   async payment(id: string, accessToken: string): Promise<MpPayment> {
     if (isOrderId(id)) return orderAsPayment(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>) as Record<string, any>);
-    const r = await this.call<Record<string, any>>('GET', `/v1/payments/${encodeURIComponent(id)}`, undefined, accessToken);
+    // Pagamento (número, avisos "payment" e cobranças antigas): também pelo SDK oficial.
+    const r = await this.sdk(`/v1/payments/${id}`, () => new MpPaymentClient(this.sdkConfig(accessToken)).get({ id }) as Promise<unknown>) as Record<string, any>;
     const fee = Array.isArray(r.fee_details) ? r.fee_details.filter((f: any) => f?.type === 'application_fee').reduce((s: number, f: any) => s + cents(f.amount), 0) : 0;
     return {
       id: String(r.id), status: String(r.status ?? ''), statusDetail: String(r.status_detail ?? ''), externalReference: r.external_reference ? String(r.external_reference) : null,
@@ -374,7 +376,7 @@ export class MercadoPagoClient {
   /** Devolve o pagamento inteiro ao comprador (a comissão do marketplace volta junto). */
   async refund(paymentId: string, accessToken: string, idem: string): Promise<void> {
     if (isOrderId(paymentId)) { await this.sdk(`/v1/orders/${paymentId}/refund`, () => this.sdkOrders(accessToken).refund({ id: paymentId, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>); return; }
-    await this.call('POST', `/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {}, accessToken, idem);
+    await this.sdk(`/v1/payments/${paymentId}/refunds`, () => new MpRefundClient(this.sdkConfig(accessToken)).create({ payment_id: paymentId, body: {}, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>);
   }
 
   // ------------------------------------------------------------------ balcão: maquininha Point e Pix (API de Orders)

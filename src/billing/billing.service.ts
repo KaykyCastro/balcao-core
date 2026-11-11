@@ -287,7 +287,11 @@ export class BillingService {
 
     const enterprise = await this.enterpriseService.findEnterpriseById(enterpriseId);
     // CPF/CNPJ do pagador: o da empresa, senão o informado nos dados do vendedor da loja online (melhora a aprovação).
-    const sellerDoc = String(((await this.connection.models.Store?.findOne({ enterpriseId: enterprise._id }).select('legal.document').lean()) as { legal?: { document?: string } } | null)?.legal?.document ?? '');
+    const legal = ((await this.connection.models.Store?.findOne({ enterpriseId: enterprise._id }).select('legal.document legal.name').lean()) as { legal?: { document?: string; name?: string } } | null)?.legal;
+    const sellerDoc = String(legal?.document ?? '');
+    // Nome e sobrenome do pagador: o da conta; se for uma palavra só, o nome do vendedor da loja online (dado real).
+    const fullName = (n?: string) => (n ?? '').trim().split(/\s+/).filter(Boolean).length >= 2;
+    const payerName = fullName(enterprise.name) || !fullName(legal?.name) ? enterprise.name : legal!.name!.trim();
     const id = String(invoice._id);
     const api = (this.config.get<string>('APP_URL') ?? '').replace(/\/$/, '');
     const front = (this.config.get<string>('FRONTEND_URL') ?? '').replace(/\/$/, '');
@@ -301,7 +305,7 @@ export class BillingService {
         orderId: id,
         idem: `pref-${id}${retry}`,
         items: [{ title: `Taxa de uso do Balcão ERP (${invoice.periodFrom}${invoice.periodFrom !== invoice.periodTo ? ` a ${invoice.periodTo}` : ''})`, description: 'Taxa mensal de uso do sistema de vendas Balcão ERP', categoryId: 'services', quantity: 1, unitCents: invoice.amountCents }],
-        payer: selfPay ? { name: enterprise.name } : { name: enterprise.name, email: enterprise.email, document: enterprise.cnpj || sellerDoc, registeredAt: (enterprise as { createdAt?: Date }).createdAt ?? null },
+        payer: selfPay ? { name: payerName } : { name: payerName, email: enterprise.email, document: enterprise.cnpj || sellerDoc, registeredAt: (enterprise as { createdAt?: Date }).createdAt ?? null },
         backUrl: `${front}/app/pagamento?fatura=${id}`,
         notificationUrl: api.startsWith('https://') ? `${api}/billing/webhook/mercadopago?i=${id}&s=${sign('invoice', id)}` : undefined,
         statementDescriptor: 'BALCAO ERP',
@@ -309,7 +313,7 @@ export class BillingService {
         expiresAt: new Date(Date.now() + 3 * 86_400_000),
       });
       // Diagnóstico sem dado pessoal: se o pagador foi junto na ordem e, se não, por quê.
-      this.logger.log(`Fatura ${id}: ordem ${pref.id}; pagador ${selfPay ? 'NÃO enviado (e-mail da conta do lojista = e-mail da conta que recebe)' : enterprise.email ? `enviado (documento: ${enterprise.cnpj || sellerDoc ? 'sim' : 'não'})` : 'NÃO enviado (conta sem e-mail)'}`);
+      this.logger.log(`Fatura ${id}: ordem ${pref.id}; pagador ${selfPay ? 'NÃO enviado (e-mail da conta do lojista = e-mail da conta que recebe)' : enterprise.email ? `enviado (sobrenome: ${fullName(payerName) ? 'sim' : 'não'}, documento: ${enterprise.cnpj || sellerDoc ? 'sim' : 'não'})` : 'NÃO enviado (conta sem e-mail)'}`);
       const updated = await this.invoiceModel.findByIdAndUpdate(invoice._id, { $set: { checkoutUrl: pref.initPoint, preferenceId: pref.id } }, { returnDocument: 'after' });
       return this.present(updated!);
     } catch (e) {
