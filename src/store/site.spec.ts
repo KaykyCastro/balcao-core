@@ -2,9 +2,9 @@ import { FAVICON_RE, hasCheckout, MODE_RULES, modeOf, SELECTABLE_MODES } from '.
 import { SeoController } from './seo.controller';
 
 describe('tipos de loja', () => {
-  it('escolhíveis: E-commerce e Catálogo online; Cardápio fica fora (em desenvolvimento)', () => {
-    expect(SELECTABLE_MODES).toEqual(['ecommerce', 'whatsapp']);
-    expect(SELECTABLE_MODES).not.toContain('menu');
+  it('escolhíveis: E-commerce, Catálogo online e Cardápio; Loja virtual só para quem já usa', () => {
+    expect(SELECTABLE_MODES).toEqual(['ecommerce', 'whatsapp', 'menu']);
+    expect(SELECTABLE_MODES).not.toContain('catalog');
   });
   it('Catálogo online não tem checkout nem entrega no site', () => {
     expect(hasCheckout('whatsapp')).toBe(false);

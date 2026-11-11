@@ -1,10 +1,13 @@
 import { Type } from 'class-transformer';
+import { OptionChoiceDto } from './order.dto';
 import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsInt, IsMongoId, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 
 export class TabLineDto {
   @IsMongoId() productId: string;
   @IsInt() @Min(1) @Max(50) quantity: number;
   @IsOptional() @IsString() @MaxLength(140) note?: string;
+  /** Adicionais escolhidos (cardápio); preço calculado na API. */
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => OptionChoiceDto) options?: OptionChoiceDto[];
 }
 export class TabLinesDto {
   @IsArray() @ArrayNotEmpty() @ArrayMaxSize(40) @ValidateNested({ each: true }) @Type(() => TabLineDto) items: TabLineDto[];

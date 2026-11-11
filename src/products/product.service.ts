@@ -1,6 +1,7 @@
 import { StorageService } from '../storage/storage.service';
+import { OptionsError, sanitizeOptions } from './options.rules';
 import { removedUrls } from '../storage/storage.rules';
-import { ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, UnprocessableEntityException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, QueryFilter, Model, Types } from 'mongoose';
 
@@ -20,6 +21,12 @@ export function imagesOf(p: { image?: string | null; images?: string[] | null })
 function withImages<T extends { toJSON?: () => any; image?: string; images?: string[] }>(doc: T) {
   const json = typeof doc.toJSON === 'function' ? doc.toJSON() : doc;
   return { ...json, images: imagesOf(json) };
+}
+
+/** Adicionais validados; erro de regra vira 400 com a mensagem pronta. */
+function optionsOrThrow(raw: unknown) {
+  try { return sanitizeOptions(raw ?? []); }
+  catch (e) { if (e instanceof OptionsError) throw new BadRequestException({ statusCode: 400, code: 'OPTIONS_INVALID', message: e.message }); throw e; }
 }
 
 @Injectable()
@@ -43,6 +50,7 @@ export class ProductService {
       const images = (await this.storage.resolveMany(enterpriseId, 'product', dto.images ?? (dto.image ? [dto.image] : []))).filter(Boolean);
       const created = await this.productModel.create({
         ...dto,
+        options: optionsOrThrow(dto.options),
         images, image: images[0] ?? '',
         trackStock,
         quantity: trackStock ? dto.quantity ?? 0 : 0,
@@ -91,6 +99,8 @@ export class ProductService {
     if (dto.categoryId) await this.categoryService.findCategoryById(enterpriseId, dto.categoryId);
 
     const set: Record<string, unknown> = { ...dto };
+    if (dto.options !== undefined) set.options = optionsOrThrow(dto.options);
+    else delete set.options;
     // Fotos: `images` manda a lista inteira; `image` sozinho (app antigo) troca só a capa e mantém as outras.
     let before: string[] = [];
     if (dto.images !== undefined || dto.image !== undefined) {

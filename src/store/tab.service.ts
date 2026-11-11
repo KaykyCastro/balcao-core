@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
+import { OptionsError, priceChoice, type OptionGroup, type PickedOption } from '../products/options.rules';
 import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
@@ -26,7 +27,7 @@ const RECENT_MS = 4 * 3_600_000;
 /** Quem da equipe fez a ação (funcionário logado). null = o dono. */
 export type Who = { id: string; name: string; role?: string } | null;
 
-export interface TabLine { productId: string; quantity: number; note?: string }
+export interface TabLine { productId: string; quantity: number; note?: string; options?: { g: string; i: string; q: number }[] }
 type PayMethod = 'cash' | 'pix' | 'card' | 'other';
 
 export function tabTotals(items: Pick<TabItem, 'status' | 'totalCents'>[], rateBps: number) {
@@ -143,17 +144,23 @@ export class TabService {
   private async addLines(tab: TabDocument, lines: TabLine[], by: 'customer' | 'staff') {
     if (!lines.length) throw new BadRequestException('Nenhum item');
     const eid = String(tab.enterpriseId);
-    const qty = new Map<string, { quantity: number; note: string }>();
-    for (const l of lines) {
-      const k = `${l.productId}|${(l.note ?? '').trim()}`;
-      const cur = qty.get(k);
-      qty.set(k, { quantity: Math.min(99, (cur?.quantity ?? 0) + l.quantity), note: (l.note ?? '').trim().slice(0, 140) });
-    }
     const ids = [...new Set(lines.map((l) => l.productId))];
     // Cliente só pede o que está no cardápio online; a equipe lança qualquer produto (couvert, rolha...).
     const list = by === 'customer' ? await this.products.publicMany(eid, ids) : await Promise.all(ids.map((i) => this.products.getProductById(eid, i)));
     if (list.length !== ids.length) throw new UnprocessableEntityException('Algum item não está mais no cardápio. Atualize a página.');
     const byId = new Map(list.map((p) => [String(p._id), p]));
+    // Mesma escolha (produto, adicionais e observação) vira uma linha só. Adicionais conferidos e precificados aqui.
+    const qty = new Map<string, { pid: string; quantity: number; note: string; extra: number; options?: PickedOption[] }>();
+    for (const l of lines) {
+      const p = byId.get(l.productId)!;
+      let c: ReturnType<typeof priceChoice>;
+      try { c = priceChoice((p as { options?: OptionGroup[] }).options, l.options, p.name); }
+      catch (e) { if (e instanceof OptionsError) throw new UnprocessableEntityException({ statusCode: 422, code: 'OPTIONS_INVALID', message: e.message }); throw e; }
+      const note = (l.note ?? '').trim().slice(0, 140);
+      const k = `${l.productId}|${c.key}|${note}`;
+      const cur = qty.get(k);
+      qty.set(k, { pid: l.productId, quantity: Math.min(99, (cur?.quantity ?? 0) + l.quantity), note, extra: c.extraCents, options: c.picked.length ? c.picked : undefined });
+    }
     await this.run(async (session) => {
       const cur = await this.tabs.findOne({ _id: tab._id, status: 'open' }).session(session);
       if (!cur) throw new ConflictException('Esta conta já foi fechada');
@@ -161,16 +168,15 @@ export class TabService {
       const promos = await this.promotions.activeFor(eid, ids, session);
       const now = new Date();
       const added: TabItem[] = [];
-      for (const [k, { quantity, note }] of qty) {
-        const pid = k.split('|')[0];
+      for (const { pid, quantity, note, extra, options } of qty.values()) {
         const p = byId.get(pid)!;
         const r = await this.products.decreaseQuantity(eid, pid, quantity, session);
         const normal = toCents(onlineEffectivePrice(p));
-        const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), normal), stockTracked: r.tracked, note, by, at: now, status: 'new' as const };
+        const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), normal) + extra, stockTracked: r.tracked, note, by, at: now, status: 'new' as const, ...(options ? { options } : {}) };
         const pr = promos.get(pid);
         const promoQty = pr && pr.promoPriceCents < normal ? await this.promotions.consume(pr, quantity, session) : 0;
-        if (promoQty > 0) added.push({ ...base, _id: new Types.ObjectId(), unitPriceCents: pr!.promoPriceCents, quantity: promoQty, totalCents: pr!.promoPriceCents * promoQty, promotionId: pr!._id as Types.ObjectId });
-        if (quantity - promoQty > 0) added.push({ ...base, _id: new Types.ObjectId(), unitPriceCents: normal, quantity: quantity - promoQty, totalCents: normal * (quantity - promoQty) });
+        if (promoQty > 0) added.push({ ...base, _id: new Types.ObjectId(), unitPriceCents: pr!.promoPriceCents + extra, quantity: promoQty, totalCents: (pr!.promoPriceCents + extra) * promoQty, promotionId: pr!._id as Types.ObjectId });
+        if (quantity - promoQty > 0) added.push({ ...base, _id: new Types.ObjectId(), unitPriceCents: normal + extra, quantity: quantity - promoQty, totalCents: (normal + extra) * (quantity - promoQty) });
       }
       const items = [...cur.items, ...added];
       if (items.length > MAX_ITEMS) throw new UnprocessableEntityException('Conta com itens demais. Peça ao garçom para abrir outra.');
@@ -400,7 +406,7 @@ export class TabService {
       }
       const live = t.items.filter((i) => i.status !== 'cancelled');
       if (!live.length) throw new ConflictException('A conta está vazia');
-      const items: SaleItem[] = live.map((i) => ({ productId: i.productId, productName: i.productName, productCode: i.productCode, unitPriceCents: i.unitPriceCents, originalUnitPriceCents: i.originalUnitPriceCents, stockTracked: i.stockTracked, quantity: i.quantity, totalCents: i.totalCents, ...(i.promotionId ? { promotionId: i.promotionId } : {}) }) as SaleItem);
+      const items: SaleItem[] = live.map((i) => ({ productId: i.productId, productName: i.productName, productCode: i.productCode, unitPriceCents: i.unitPriceCents, originalUnitPriceCents: i.originalUnitPriceCents, stockTracked: i.stockTracked, quantity: i.quantity, totalCents: i.totalCents, ...(i.options?.length ? { options: i.options } : {}), ...(i.note ? { note: i.note } : {}), ...(i.promotionId ? { promotionId: i.promotionId } : {}) }) as SaleItem);
       const { subtotalCents, serviceCents } = tabTotals(t.items, t.serviceRateBps);
       const sale = await this.sales.recordTabSale(eid, {
         tabId: t._id, tab: { table: t.table, number: t.number, name: t.name, label: this.label(store) }, items, subtotalCents, serviceCents,
@@ -466,7 +472,7 @@ export class TabService {
   present(t: TabDocument, store: StoreDocument, isPublic = false) {
     const items = t.items.filter((i) => !isPublic || i.status !== 'cancelled').map((i) => ({
       id: String(i._id), productId: String(i.productId), name: i.productName, code: i.productCode, quantity: i.quantity, unitPriceCents: i.unitPriceCents,
-      totalCents: i.totalCents, promo: !!i.promotionId, note: i.note ?? '', by: i.by, at: i.at, status: i.status, ...(isPublic ? {} : { cancelReason: i.cancelReason ?? '' }),
+      totalCents: i.totalCents, promo: !!i.promotionId, note: i.note ?? '', options: i.options ?? [], by: i.by, at: i.at, status: i.status, ...(isPublic ? {} : { cancelReason: i.cancelReason ?? '' }),
     }));
     const p = t.payment;
     return {

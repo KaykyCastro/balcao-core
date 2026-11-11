@@ -17,6 +17,8 @@ export interface TabItem {
   unitPriceCents: number; originalUnitPriceCents?: number; quantity: number; totalCents: number;
   promotionId?: Types.ObjectId; stockTracked: boolean;
   note: string;
+  /** Adicionais escolhidos (cardápio), em texto; o preço já está em unitPriceCents. */
+  options?: { group: string; name: string; qty: number; priceCents: number }[];
   /** Quem lançou: o cliente pelo celular ou a equipe pelo painel. */
   by: 'customer' | 'staff';
   at: Date;

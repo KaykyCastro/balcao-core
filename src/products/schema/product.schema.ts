@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Schema as MongooseSchema, Types, HydratedDocument } from 'mongoose';
+import type { OptionGroup } from '../options.rules';
 
 export type ProductDocument = HydratedDocument<ProductSchema>;
 
@@ -68,6 +69,13 @@ export class ProductSchema {
 
   @Prop({ type: Number, default: null, min: 0 })
   lengthCm?: number | null;
+
+  /**
+   * Adicionais (cardápio): grupos de opções que o cliente escolhe ao pedir ("Escolha 3 queijos", "Borda").
+   * Regras e preço em options.rules.ts; vazio = produto sem escolhas.
+   */
+  @Prop({ type: [MongooseSchema.Types.Mixed], default: [] })
+  options: OptionGroup[];
 
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'EnterpriseSchema', required: true, index: true })
   enterpriseId: Types.ObjectId;

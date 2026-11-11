@@ -52,6 +52,14 @@ export const BLOCKS: Record<string, Record<string, F>> = {
   reviewWall: { title: t(120), photosOnly: B, limit: n(3, 24), showCount: B },
   // código: o lojista escreve JSX restrito; a árvore e o CSS (props.out) são gerados no servidor ao salvar (code/code.service.ts)
   code: { code: L(20_000) },
+  // cardápio (restaurante, lanchonete, pizzaria, delivery): topo com os dados da casa, cardápio completo com adicionais,
+  // destaques, informações (horário, entrega, pagamento) e a barra da sacola fixa embaixo
+  menuHero: { title: t(80), subtitle: t(160), cover: IMG, overlay: n(0, 90), showLogo: B, showStatus: B, showDelivery: B, nav: B, style: e('cover', 'plain', 'brand', 'banner') },
+  menuShop: { ids: ids(30), banners: list(4, { image: IMG, link: LINK, alt: t(80) }), search: B, badges: B, sidebar: B, cashback: B, quote: B },
+  menuList: { title: t(120), ids: ids(30), nav: B, search: B, layout: e('list', 'grid', 'compact'), photos: B, descriptions: B },
+  menuHighlights: { title: t(120), source: e('sold', 'offers', 'new', 'selected'), ids: ids(12), limit: n(2, 12), style: e('cards', 'row') },
+  menuInfo: { title: t(120), hours: B, delivery: B, payments: B, address: B, whatsapp: B },
+  menuCartBar: { label: t(40), style: TONE3 },
   // varejo grande (eletro, eletrônicos, utilidades): faixa de mensagens, departamentos com foto, catálogo com filtros, trilho de ofertas
   promoStrip: { items: list(3, { text: t(80), link: LINK }), style: TONE3 },
   categoryIcons: { title: t(60), fromCategories: B, items: list(12, { image: IMG, label: t(40), link: LINK }), size: e('md', 'lg') },

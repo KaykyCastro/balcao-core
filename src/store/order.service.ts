@@ -1,4 +1,5 @@
 import { phoneIndex } from '../common/security/field-crypto';
+import { lineName, OptionsError, priceChoice } from '../products/options.rules';
 import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
 import { CustomerService } from '../customer/customer.service';
@@ -34,6 +35,9 @@ import { crossTenant } from '../common/security/tenant-guard.plugin';
 const SCOPE = 'store-order';
 const fmt = (c: number) => (c / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
+/** Linha do carrinho como chega do site: produto, quantidade, adicionais escolhidos e observação. */
+export interface CartLineInput { productId: string; quantity: number; options?: { g: string; i: string; q: number }[]; note?: string }
+
 @Injectable()
 export class OrderService {
   private readonly logger = new Logger(OrderService.name);
@@ -64,25 +68,43 @@ export class OrderService {
 
   // ------------------------------------------------------------------ carrinho e frete (público)
 
-  /** Junta itens repetidos e confere se os produtos estão publicados. Preço "de vitrine" (promoção sem reservar). */
-  async priceCart(store: StoreDocument, items: { productId: string; quantity: number }[]): Promise<PricedLine[]> {
-    const qty = new Map<string, number>();
-    for (const i of items) qty.set(i.productId, Math.min(999, (qty.get(i.productId) ?? 0) + i.quantity));
+  /**
+   * Junta itens repetidos (mesmo produto, mesmos adicionais e mesma observação) e confere se os produtos estão
+   * publicados. Preço "de vitrine" (promoção sem reservar) + adicionais, calculados aqui pelas regras do produto.
+   */
+  async priceCart(store: StoreDocument, items: CartLineInput[], lenient = false): Promise<PricedLine[]> {
     const eid = String(store.enterpriseId);
-    const list = await this.products.publicMany(eid, [...qty.keys()]);
-    if (list.length !== qty.size) throw new UnprocessableEntityException('Algum produto do carrinho não está mais disponível. Atualize a página.');
+    const ids = [...new Set(items.map((i) => i.productId))];
+    const list = await this.products.publicMany(eid, ids);
+    if (list.length !== ids.length) throw new UnprocessableEntityException('Algum produto do carrinho não está mais disponível. Atualize a página.');
+    const byId = new Map(list.map((p) => [String(p._id), p]));
     const promos = await this.promotions.activeFor(eid, list.map((p) => p._id));
-    return list.map((p) => {
+    const lines = new Map<string, PricedLine>();
+    for (const i of items) {
+      const p = byId.get(i.productId)!;
+      let choice: ReturnType<typeof priceChoice>;
+      try { choice = priceChoice(p.options, i.options, p.name); }
+      catch (e) {
+        if (!(e instanceof OptionsError)) throw e;
+        // Cotação de frete (página do produto, antes de escolher): conta sem os adicionais. No checkout, recusa.
+        if (!lenient) throw new UnprocessableEntityException({ statusCode: 422, code: 'OPTIONS_INVALID', message: e.message });
+        choice = { extraCents: 0, picked: [], key: '' };
+      }
+      const note = i.note?.replace(/\s+/g, ' ').trim().slice(0, 140) || undefined;
+      const key = `${i.productId}|${choice.key}|${note ?? ''}`;
+      const cur = lines.get(key);
+      if (cur) { cur.quantity = Math.min(999, cur.quantity + i.quantity); continue; }
       const normal = toCents(onlineEffectivePrice(p)); // preço da loja online (pode ser diferente do balcão)
       const pr = promos.get(String(p._id));
-      const unit = pr && pr.promoPriceCents < normal ? pr.promoPriceCents : normal;
-      return { productId: String(p._id), name: p.name, quantity: qty.get(String(p._id))!, unitCents: unit, dims: p };
-    });
+      const base = pr && pr.promoPriceCents < normal ? pr.promoPriceCents : normal;
+      lines.set(key, { productId: String(p._id), name: p.name, quantity: Math.min(999, i.quantity), unitCents: base + choice.extraCents, extraCents: choice.extraCents, options: choice.picked.length ? choice.picked : undefined, note, dims: p });
+    }
+    return [...lines.values()];
   }
 
-  async quote(slug: string, cep: string, items: { productId: string; quantity: number }[], preview?: string) {
+  async quote(slug: string, cep: string, items: CartLineInput[], preview?: string) {
     const { store } = await this.stores.publicBySlug(slug, { preview });
-    const lines = await this.priceCart(store, items);
+    const lines = await this.priceCart(store, items, true);
     const options = await this.stores.quote(store, cep, lines);
     return { options, subtotalCents: lines.reduce((s, l) => s + l.unitCents * l.quantity, 0) };
   }
@@ -143,9 +165,13 @@ export class OrderService {
           const normal = toCents(onlineEffectivePrice(p)); // preço da loja online (pode ser diferente do balcão)
           const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), normal), stockTracked: r.tracked };
           const pr = promos.get(l.productId);
+          // Adicionais: o mesmo valor calculado em priceCart, somado ao preço da unidade (com ou sem promoção).
+          const extra = l.extraCents ?? 0;
+          const choice = { ...(l.options ? { options: l.options } : {}), ...(l.note ? { note: l.note } : {}) };
+          const full = { ...base, ...choice, originalUnitPriceCents: base.originalUnitPriceCents + extra };
           const promoQty = pr && pr.promoPriceCents < normal ? await this.promotions.consume(pr, l.quantity, session) : 0;
-          if (promoQty > 0) items.push({ ...base, unitPriceCents: pr!.promoPriceCents, quantity: promoQty, totalCents: pr!.promoPriceCents * promoQty, promotionId: pr!._id });
-          if (l.quantity - promoQty > 0) items.push({ ...base, unitPriceCents: normal, quantity: l.quantity - promoQty, totalCents: normal * (l.quantity - promoQty) });
+          if (promoQty > 0) items.push({ ...full, unitPriceCents: pr!.promoPriceCents + extra, quantity: promoQty, totalCents: (pr!.promoPriceCents + extra) * promoQty, promotionId: pr!._id });
+          if (l.quantity - promoQty > 0) items.push({ ...full, unitPriceCents: normal + extra, quantity: l.quantity - promoQty, totalCents: (normal + extra) * (l.quantity - promoQty) });
         }
         const subtotalCents = items.reduce((s, i) => s + i.totalCents, 0);
         if (store.minOrderCents && subtotalCents < store.minOrderCents) throw new UnprocessableEntityException(`Pedido mínimo desta loja: ${fmt(store.minOrderCents)}`);
@@ -209,7 +235,7 @@ export class OrderService {
         items: order.totalCents !== order.subtotalCents + order.shipping.priceCents
           ? [{ title: `Pedido #${order.number} - ${store.name}`, quantity: 1, unitCents: order.totalCents }]
           : [
-            ...order.items.map((i) => ({ title: i.productName, quantity: i.quantity, unitCents: i.unitPriceCents })),
+            ...order.items.map((i) => ({ title: lineName(i.productName, i.options, i.note), quantity: i.quantity, unitCents: i.unitPriceCents })),
             ...(order.shipping.priceCents > 0 ? [{ title: `Frete - ${order.shipping.name}`, quantity: 1, unitCents: order.shipping.priceCents }] : []),
           ],
         payer: { name: order.customer.name, email: order.customer.email, phone: order.customer.phone, document: order.customer.document, address: order.address, registeredAt: await this.customerSince(order) },
@@ -220,7 +246,7 @@ export class OrderService {
       const link = `${this.front}/loja/${store.slug}/pedido/${oid}?t=${token}`;
       await this.orders.updateOne({ _id: order._id }, { $set: { 'payment.checkoutUrl': pref.initPoint, 'payment.preferenceId': pref.id, linkSealed: seal(link) } });
       void this.mail.send(order.customer.email, `Pedido #${order.number} recebido - ${store.name}`,
-        `Olá, ${order.customer.name.split(' ')[0]}! Seu pedido #${order.number} na ${store.name} foi criado.\n\n${order.items.map((i) => `- ${i.quantity}x ${i.productName} (${fmt(i.totalCents)})`).join('\n')}\nTotal: ${fmt(order.totalCents)}\n\nSe ainda não pagou, pague por aqui (vale por 1 hora): ${pref.initPoint}\nAcompanhe o pedido: ${link}\n\nGuarde este e-mail: o link acima é o acesso ao seu pedido, sem precisar de cadastro.`).catch(() => undefined);
+        `Olá, ${order.customer.name.split(' ')[0]}! Seu pedido #${order.number} na ${store.name} foi criado.\n\n${order.items.map((i) => `- ${i.quantity}x ${lineName(i.productName, i.options, i.note)} (${fmt(i.totalCents)})`).join('\n')}\nTotal: ${fmt(order.totalCents)}\n\nSe ainda não pagou, pague por aqui (vale por 1 hora): ${pref.initPoint}\nAcompanhe o pedido: ${link}\n\nGuarde este e-mail: o link acima é o acesso ao seu pedido, sem precisar de cadastro.`).catch(() => undefined);
       return { orderId: oid, number: order.number, token, checkoutUrl: pref.initPoint, totalCents: order.totalCents };
     } catch (e) {
       await this.release(order._id, 'cancelled', 'Falha ao gerar o pagamento').catch((err) => this.logger.error(`Reserva presa no pedido ${order._id}: ${err.message}`));
@@ -363,7 +389,7 @@ export class OrderService {
   /** Pedido para pagar na entrega: avisa a loja (pedido novo) e o cliente (resumo + link). */
   private async notifyCod(o: OrderDocument, storeName: string, link: string) {
     try {
-      const lines = o.items.map((i) => `- ${i.quantity}x ${i.productName} (${fmt(i.totalCents)})`).join('\n');
+      const lines = o.items.map((i) => `- ${i.quantity}x ${lineName(i.productName, i.options, i.note)} (${fmt(i.totalCents)})`).join('\n');
       const pay = o.payment.onDelivery ? `${PAY_ON_DELIVERY_LABEL[o.payment.onDelivery.method as 'cash']}${o.payment.onDelivery.changeForCents ? ` (troco para ${fmt(o.payment.onDelivery.changeForCents)})` : ''}` : '';
       const owner = await this.enterprises.findEnterpriseById(String(o.enterpriseId)).catch(() => null);
       if (owner?.email) await this.mail.send(owner.email, `Novo pedido #${o.number} - pagar na entrega - ${fmt(o.totalCents)}`, `Pedido #${o.number} na loja ${storeName}.\n\n${lines}\n${o.shipping.name}: ${fmt(o.shipping.priceCents)}\nTotal: ${fmt(o.totalCents)}\nPagamento na entrega: ${pay}\nCliente: ${o.customer.name} - ${o.customer.phone}\n\n${this.front}/app/pedidos?id=${o._id}`);
@@ -399,7 +425,7 @@ export class OrderService {
       const link = this.front ? `${this.front}/app/pedidos?id=${o._id}` : '';
       const ent = await this.stores.getOrCreate(String(o.enterpriseId));
       const owner = await this.enterprises.findEnterpriseById(String(o.enterpriseId)).catch(() => null);
-      const lines = o.items.map((i) => `- ${i.quantity}x ${i.productName} (${fmt(i.totalCents)})`).join('\n');
+      const lines = o.items.map((i) => `- ${i.quantity}x ${lineName(i.productName, i.options, i.note)} (${fmt(i.totalCents)})`).join('\n');
       if (owner?.email) await this.mail.send(owner.email, `Novo pedido pago #${o.number} - ${fmt(o.totalCents)}`, `Pedido #${o.number} pago na loja ${ent.name}.\n\n${lines}\nEntrega: ${o.shipping.name} (${fmt(o.shipping.priceCents)})\nCliente: ${o.customer.name} - ${o.customer.phone}\n\n${link}`);
       const sealed = (await this.orders.findById(o._id).select('+linkSealed').lean())?.linkSealed;
       const track = openSealed(sealed) ?? '';
@@ -593,7 +619,7 @@ export class OrderService {
     delete j.accessHash; delete j.payeeId; delete j.__v;
     const base = {
       id: String(o._id), number: o.number, status: o.status, statusLabel: ORDER_STATUS_LABEL[o.status], createdAt: j.createdAt,
-      items: o.items.map((i) => ({ productId: String(i.productId), name: i.productName, code: i.productCode, quantity: i.quantity, unitPriceCents: i.unitPriceCents, originalUnitPriceCents: i.originalUnitPriceCents, totalCents: i.totalCents, promo: !!i.promotionId })),
+      items: o.items.map((i) => ({ productId: String(i.productId), name: i.productName, code: i.productCode, options: i.options ?? [], note: i.note ?? '', quantity: i.quantity, unitPriceCents: i.unitPriceCents, originalUnitPriceCents: i.originalUnitPriceCents, totalCents: i.totalCents, promo: !!i.promotionId })),
       subtotalCents: o.subtotalCents, discount: { couponCode: o.discount?.couponCode ?? '', couponCents: o.discount?.couponCents ?? 0, creditCents: o.discount?.creditCents ?? 0 }, cashbackCents: o.cashbackCents ?? 0,
       shipping: o.shipping, totalCents: o.totalCents, tracking: o.tracking, history: o.history,
       expiresAt: o.expiresAt, checkoutUrl: o.status === 'pending_payment' ? o.payment?.checkoutUrl ?? null : null,

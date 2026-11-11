@@ -1,4 +1,5 @@
 import { Types } from 'mongoose';
+import { sanitizeOptions } from '../products/options.rules';
 import { baseShippingOptions, canCancel, canMove, carrierOption, inCepRanges, itemDims, modeOf, slugify, slugProblem, trackingUrlFor } from './store.rules';
 import { parseQuotes } from './melhor-envio.client';
 import { open, seal } from '../common/secret-box';
@@ -201,6 +202,34 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
     const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 3 }], customer, shippingOptionId: 'pickup' });
     expect(r.totalCents).toBe(2 * 15000 + 18990);
     expect(t.docs.get(r.orderId).address).toBeNull();
+  });
+
+  it('checkout com adicionais (cardápio): preço da escolha somado no servidor, uma linha por escolha, texto no pedido', async () => {
+    const t = setup({ promo: { priceCents: 15000, grant: 1 } });
+    (prodA as any).options = sanitizeOptions([
+      { id: 'qj', name: 'Queijos', min: 2, max: 2, items: [{ id: 'mu', name: 'Mussarela' }, { id: 'go', name: 'Gorgonzola', priceCents: 400 }, { id: 'pr', name: 'Provolone' }] },
+      { id: 'bd', name: 'Borda', max: 1, items: [{ id: 'ca', name: 'Catupiry', priceCents: 800 }] },
+    ]);
+    try {
+      const pick = (...ids: string[]) => ids.map((i) => ({ g: i === 'ca' ? 'bd' : 'qj', i, q: 1 }));
+      const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, customer, shippingOptionId: 'pickup', items: [
+        { productId: String(prodA._id), quantity: 1, options: pick('mu', 'go', 'ca'), note: 'bem assada' },
+        { productId: String(prodA._id), quantity: 2, options: pick('mu', 'pr') },
+        { productId: String(prodA._id), quantity: 1, options: pick('pr', 'mu') }, // mesma escolha em outra ordem: junta
+      ] });
+      const items = t.docs.get(r.orderId).items;
+      // O mock libera 1 unidade de promoção por linha. 1ª escolha: promoção + 1200 de adicionais;
+      // 2ª (3 unidades, adicionais sem custo): 1 na promoção e 2 no preço normal.
+      expect(items.map((i: any) => [i.quantity, i.unitPriceCents])).toEqual([[1, 15000 + 1200], [1, 15000], [2, 18990]]);
+      expect(r.totalCents).toBe(16200 + 15000 + 2 * 18990);
+      expect(items[0].options).toEqual([{ group: 'Queijos', name: 'Mussarela', qty: 1, priceCents: 0 }, { group: 'Queijos', name: 'Gorgonzola', qty: 1, priceCents: 400 }, { group: 'Borda', name: 'Catupiry', qty: 1, priceCents: 800 }]);
+      expect(items[0].note).toBe('bem assada');
+      expect(t.mp.createPreference.mock.calls[0][0].items[0].title).toBe('Vestido Midi (Queijos: Mussarela, Gorgonzola · Borda: Catupiry · Obs.: bem assada)');
+      // Escolha que não fecha as regras do produto: 422 sem mexer no estoque.
+      t.products.decreaseQuantity.mockClear();
+      await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, customer, shippingOptionId: 'pickup', items: [{ productId: String(prodA._id), quantity: 1, options: pick('mu') }] })).rejects.toMatchObject({ status: 422 });
+      expect(t.products.decreaseQuantity).not.toHaveBeenCalled();
+    } finally { delete (prodA as any).options; }
   });
 
   it('checkout: sem estoque não cria pedido', async () => {

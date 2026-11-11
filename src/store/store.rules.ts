@@ -51,8 +51,8 @@ export const MODE_RULES: Record<StoreMode, { label: string; shipping: ShippingKi
   menu: { label: 'Cardápio', shipping: ['pickup', 'local', 'table'], tables: true, shipHours: 2, pickupHours: 2, graceHours: 2, confirmHours: 24, regret: false },
   whatsapp: { label: 'Catálogo online', shipping: [], tables: false, shipHours: 0, pickupHours: 0, graceHours: 0, confirmHours: 0, regret: false },
 };
-/** Modos que dá para escolher agora. Cardápio está em desenvolvimento; Loja virtual só para quem já usa. */
-export const SELECTABLE_MODES: StoreMode[] = ['ecommerce', 'whatsapp'];
+/** Modos que dá para escolher agora. Loja virtual só para quem já usa. */
+export const SELECTABLE_MODES: StoreMode[] = ['ecommerce', 'whatsapp', 'menu'];
 /** Catálogo online não tem carrinho nem checkout: o cliente chama a loja no WhatsApp. */
 export const hasCheckout = (m: StoreMode) => m !== 'whatsapp';
 export const WHATSAPP_RE = /^\d{10,13}$/;

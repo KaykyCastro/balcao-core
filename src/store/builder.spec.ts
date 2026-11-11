@@ -4,7 +4,7 @@ const page = (blocks: unknown[], style: unknown = {}) => ({ sections: [{ id: 'se
 
 describe('construtor de sites (página por seções)', () => {
   it('tem um catálogo grande de componentes', () => {
-    expect(BLOCK_TYPES.length).toBe(118);
+    expect(BLOCK_TYPES.length).toBe(124);
     expect(BLOCK_TYPES).toEqual(expect.arrayContaining(['navbar', 'banner', 'productGrid', 'video', 'search', 'icon', 'footer', 'editorialHero', 'lookbook', 'luxeProducts', 'concierge']));
   });
 

@@ -17,6 +17,7 @@ import { ProductService } from '../products/product.service';
 import { PromotionService } from '../promotion/promotion.service';
 import { toCents } from '../common/money';
 import { onlineEffectivePrice } from '../products/schema/product.schema';
+import { minExtraCents, type OptionGroup } from '../products/options.rules';
 
 type P = Awaited<ReturnType<ProductService['publicGet']>> & { promotion?: { priceCents: number; remaining: number | null; endsAt: Date | null; name: string } | null };
 
@@ -37,6 +38,9 @@ function card(p: P, showStock: boolean, store?: { slug: string; name: string; ca
     // Prova social real: média das avaliações dos compradores e unidades já vendidas.
     rating: { avg: (p as unknown as { ratingAvg?: number }).ratingAvg ?? 0, count: (p as unknown as { ratingCount?: number }).ratingCount ?? 0 },
     sold: (p as unknown as { soldCount?: number }).soldCount ?? 0,
+    // Adicionais do cardápio (a vitrine abre a escolha antes de pôr no carrinho). Preço sempre reconferido no checkout.
+    options: (p as unknown as { options?: OptionGroup[] }).options ?? [],
+    fromCents: (promo ? promo.priceCents : normal) + minExtraCents((p as unknown as { options?: OptionGroup[] }).options),
     ...(store ? { store } : {}),
   };
 }

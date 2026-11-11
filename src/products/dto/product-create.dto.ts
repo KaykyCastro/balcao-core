@@ -67,4 +67,8 @@ export class ProductCreateDto {
   /** Preço na loja online (reais). null/0 = usa o preço do balcão. */
   @IsOptional() @ValidateIf((o) => o.onlinePrice !== null) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(10_000_000)
   onlinePrice?: number | null;
+
+  /** Adicionais (grupos de opções do cardápio). Validados por sanitizeOptions no serviço; manda a lista inteira. */
+  @IsOptional() @IsArray() @ArrayMaxSize(12)
+  options?: unknown[];
 }

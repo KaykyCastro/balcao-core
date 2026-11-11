@@ -6,9 +6,18 @@ import { Equals } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ORDER_STATUSES } from '../store.rules';
 
+export class OptionChoiceDto {
+  @IsString() @Matches(/^[a-z0-9]{1,16}$/i) g: string;
+  @IsString() @Matches(/^[a-z0-9]{1,16}$/i) i: string;
+  @IsInt() @Min(1) @Max(20) q: number;
+}
 export class CartItemDto {
   @IsMongoId() productId: string;
   @IsInt() @Min(1) @Max(999) quantity: number;
+  /** Adicionais escolhidos (cardápio). O preço deles é calculado na API pelas regras do produto. */
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => OptionChoiceDto) options?: OptionChoiceDto[];
+  /** Observação desta linha ("sem cebola"). */
+  @IsOptional() @IsString() @MaxLength(140) note?: string;
 }
 
 export class QuoteDto {

@@ -35,6 +35,14 @@ export class SaleItem {
 
   @Prop({ required: true, min: 0 })
   totalCents: number;
+
+  /** Adicionais escolhidos (cardápio), em texto: o preço já está somado em unitPriceCents. */
+  @Prop({ type: [{ _id: false, group: String, name: String, qty: Number, priceCents: Number }], default: undefined })
+  options?: { group: string; name: string; qty: number; priceCents: number }[];
+
+  /** Observação do cliente para esta linha ("sem cebola"). */
+  @Prop({ type: String, default: undefined })
+  note?: string;
 }
 const SaleItemSchema = SchemaFactory.createForClass(SaleItem);
 

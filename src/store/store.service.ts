@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import type { PickedOption } from '../products/options.rules';
 import { StorageService } from '../storage/storage.service';
 import { removedUrls } from '../storage/storage.rules';
 import { CodeService } from './code/code.service';
@@ -22,7 +23,7 @@ import { SettingsService } from '../settings/settings.service';
 import { feeWaived, trialEnd } from '../billing/billing.rules';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
 
-export interface PricedLine { productId: string; name: string; quantity: number; unitCents: number; dims: { weightGrams?: number | null; heightCm?: number | null; widthCm?: number | null; lengthCm?: number | null } }
+export interface PricedLine { productId: string; name: string; quantity: number; unitCents: number; /** Adicionais (já somados em unitCents). */ extraCents?: number; options?: PickedOption[]; note?: string; dims: { weightGrams?: number | null; heightCm?: number | null; widthCm?: number | null; lengthCm?: number | null } }
 
 /** Imagens que a loja usa (para saber o que apagar do R2 quando saem). */
 function storeImages(s: { logo?: string; banner?: string; slides?: { image?: string }[]; seo?: { favicon?: string }; page?: SitePage | null; pageDraft?: SitePage | null }) {
