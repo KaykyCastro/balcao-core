@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
+import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
@@ -129,7 +130,7 @@ export class TabService {
   /** Cliente abre a conta pelo link. Voltando do Mercado Pago (payment_id), confere o pagamento na hora. */
   async publicView(slug: string, id: string, t: string, paymentId?: string) {
     let tab = await this.byToken(slug, id, t);
-    if (paymentId && tab.status === 'open' && /^\d{1,20}$/.test(paymentId)) {
+    if (paymentId && tab.status === 'open' && MP_PAYMENT_ID_RE.test(paymentId)) {
       await this.syncPayment(tab, paymentId).catch((e) => this.logger.warn(`Conferência da conta ${id}: ${(e as Error).message}`));
       tab = (await this.tabs.findById(tab._id))!;
     }
@@ -332,14 +333,15 @@ export class TabService {
     if (!/^[a-f0-9]{24}$/i.test(id) || !verifySigned(SCOPE, id, q.s)) throw new UnauthorizedException('Token inválido');
     const topic = String(q.type ?? q.topic ?? body?.type ?? body?.topic ?? '');
     const paymentId = String(q['data.id'] ?? body?.data?.id ?? (topic === 'payment' ? q.id ?? '' : '') ?? '');
-    if (topic !== 'payment' || !/^\d{1,20}$/.test(paymentId)) return { received: true, outcome: 'ignored' };
+    if (topic !== 'payment' || !MP_PAYMENT_ID_RE.test(paymentId)) return { received: true, outcome: 'ignored' };
     if (headers.signature && !this.mp.verifySignature(paymentId, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
     const tab = await crossTenant(this.tabs, 'webhook: comanda identificada pela URL assinada').findById(id);
     if (!tab) return { received: true, outcome: 'tab_not_found' };
     return { received: true, outcome: await this.syncPayment(tab, paymentId) };
   }
 
-  private async syncPayment(tab: TabDocument, paymentId: string): Promise<string> {
+  /** Público para o webhook único de ordens (mp-orders-webhook.service.ts). */
+  async syncPayment(tab: TabDocument, paymentId: string): Promise<string> {
     const store = await this.storeOf(tab);
     const pay = await this.mp.payment(paymentId, await this.stores.mpAccessToken(store._id));
     if (pay.externalReference !== String(tab._id)) return 'not_this_tab';

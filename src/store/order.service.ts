@@ -1,4 +1,5 @@
 import { phoneIndex } from '../common/security/field-crypto';
+import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
 import { CustomerService } from '../customer/customer.service';
 import { ShopperService, fmtAddress } from '../shopper/shopper.service';
@@ -253,7 +254,7 @@ export class OrderService {
     if (!/^[a-f0-9]{24}$/i.test(oid) || !verifySigned(SCOPE, oid, q.s)) throw new UnauthorizedException('Token inválido');
     const topic = String(q.type ?? q.topic ?? body?.type ?? body?.topic ?? '');
     const paymentId = String(q['data.id'] ?? body?.data?.id ?? (topic === 'payment' ? q.id ?? '' : '') ?? '');
-    if (topic !== 'payment' || !/^\d{1,20}$/.test(paymentId)) return { received: true, outcome: 'ignored' };
+    if (topic !== 'payment' || !MP_PAYMENT_ID_RE.test(paymentId)) return { received: true, outcome: 'ignored' };
     if (headers.signature && !this.mp.verifySignature(paymentId, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
     // O pedido vem da URL assinada do webhook (token por pedido); o pagamento é reconsultado no Mercado Pago.
     const o = await crossTenant(this.orders, 'webhook: pedido identificado pela URL assinada').findById(oid);
@@ -264,8 +265,9 @@ export class OrderService {
   }
 
   /** Lê o pagamento no Mercado Pago e aplica: aprovado vira venda; estornado depois de pago cancela o pedido. */
-  private async syncPayment(o: OrderDocument, paymentId: string): Promise<string> {
-    if (!/^\d{1,20}$/.test(paymentId)) return 'unverifiable';
+  /** Público para o webhook único de ordens (mp-orders-webhook.service.ts). */
+  async syncPayment(o: OrderDocument, paymentId: string): Promise<string> {
+    if (!MP_PAYMENT_ID_RE.test(paymentId)) return 'unverifiable';
     const token = await this.stores.mpAccessToken(o.storeId);
     const pay = await this.mp.payment(paymentId, token);
     if (pay.externalReference !== String(o._id)) { this.logger.warn(`Pagamento ${paymentId} não é do pedido ${o._id}`); return 'not_this_order'; }

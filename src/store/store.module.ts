@@ -1,4 +1,5 @@
 import { CodeService } from './code/code.service';
+import { MpOrdersWebhookService } from './mp-orders-webhook.service';
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Store, StoreSchemaFactory } from './schema/store.schema';
@@ -61,7 +62,7 @@ import { StaffModule } from '../staff/staff.module';
     EnterprisesModule, ProductModule, CategorysModule, PromotionModule, SaleModule, BillingModule, MailModule, SettingsModule, MercadoPagoModule, CustomerModule, ShopperModule, StaffModule,
   ],
   controllers: [StoreConfigController, MediaController, OrderController, SeoController, MarketplaceController, MarketBannerController, CouponController, PublicReviewController, MerchantReviewController, StorefrontController, ShopperAccountController, TabController, TabPublicController],
-  providers: [CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
+  providers: [MpOrdersWebhookService, CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
   exports: [StoreService, OrderService, ProtectionService, TabService, MarketBannerService],
 })
 export class StoreModule {}

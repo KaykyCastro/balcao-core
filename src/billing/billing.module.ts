@@ -28,6 +28,6 @@ import { WhatsAppClient } from './whatsapp.client';
   ],
   controllers: [BillingController],
   providers: [BillingService, BillingScheduler, BillingNoticeService, AutopayService, WhatsAppClient],
-  exports: [BillingService],
+  exports: [BillingService, AutopayService],
 })
 export class BillingModule {}

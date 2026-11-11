@@ -92,6 +92,40 @@ export function payerOf(p: MpPreferenceInput['payer']) {
   };
 }
 
+/** Id que o Balcão aceita como pagamento do Mercado Pago: número (pagamento antigo) ou ordem da API de Orders ("ORD…"). */
+export const MP_PAYMENT_ID_RE = /^(\d{1,20}|ORD[A-Z0-9]{10,40})$/;
+export const isOrderId = (id: string) => /^ORD[A-Z0-9]{10,40}$/.test(id);
+
+/** Pagador no formato da API de Orders. Só vai o que existe; o e-mail é obrigatório quando o pagador vai. */
+export function orderPayerOf(p: MpPreferenceInput['payer']) {
+  const legacy = payerOf(p);
+  return {
+    ...(legacy.email ? { email: legacy.email } : {}),
+    ...(legacy.name ? { first_name: legacy.name } : {}), ...(legacy.surname ? { last_name: legacy.surname } : {}),
+    ...(legacy.phone ? { phone: legacy.phone } : {}),
+    ...(legacy.identification ? { identification: legacy.identification } : {}),
+    ...(legacy.address ? { address: legacy.address } : {}),
+  };
+}
+
+/**
+ * Ordem de Checkout Pro → o mesmo formato de pagamento que o resto do Balcão já confere (referência, conta, valor):
+ * processada e creditada = "approved"; devolvida = "refunded"; falhou = "rejected"; cancelada/expirada = "cancelled".
+ */
+export function orderAsPayment(r: Record<string, any>): MpPayment {
+  const st = String(r.status ?? ''), det = String(r.status_detail ?? '');
+  const status = st === 'processed' && (det === 'accredited' || det === 'partially_refunded') ? 'approved'
+    : st === 'refunded' ? 'refunded' : st === 'failed' ? 'rejected' : st === 'canceled' || st === 'expired' ? 'cancelled'
+    : st === 'action_required' || st === 'processing' ? 'in_process' : st || 'pending';
+  const pay = Array.isArray(r.transactions?.payments) ? r.transactions.payments[0] : null;
+  return {
+    id: String(r.id ?? ''), status, statusDetail: det, externalReference: r.external_reference ? String(r.external_reference) : null,
+    amountCents: cents(r.total_paid_amount ?? 0), collectorId: r.user_id != null ? String(r.user_id) : null,
+    marketplaceFeeCents: cents(r.marketplace_fee ?? 0), method: pay?.payment_method?.type ? String(pay.payment_method.type) : null,
+    approvedAt: status === 'approved' ? String(r.last_updated_date ?? '') || null : null,
+  };
+}
+
 @Injectable()
 export class MercadoPagoClient {
   private readonly logger = new Logger(MercadoPagoClient.name);
@@ -191,27 +225,49 @@ export class MercadoPagoClient {
   }
 
   /** Checkout Pro na conta do lojista, com a comissão do Balcão (marketplace_fee) separada automaticamente. */
+  /**
+   * Cobrança de Checkout Pro pela API de Orders (o modelo da aplicação certificada): POST /v1/orders com type "online" e
+   * processing_mode "manual"; o comprador paga no `checkout_url`. O id devolvido é o da ordem ("ORD…"): é com ele que
+   * `payment()` confere e `refund()` devolve. Os avisos chegam no webhook único do painel (evento Order), não por cobrança.
+   * Se o Mercado Pago recusar algum campo opcional (400/422), tenta de novo só com o essencial.
+   */
   async createPreference(p: MpPreferenceInput): Promise<{ id: string; initPoint: string }> {
-    const r = await this.call<Record<string, unknown>>('POST', '/checkout/preferences', {
-      items: p.items.map((i, k) => ({
-        id: String(k + 1), title: i.title.slice(0, 250), description: (i.description ?? i.title).slice(0, 250), category_id: i.categoryId ?? 'others',
-        quantity: i.quantity, unit_price: i.unitCents / 100, currency_id: 'BRL',
-      })),
-      payer: payerOf(p.payer),
-      external_reference: p.orderId,
-      ...(p.marketplaceFeeCents ? { marketplace_fee: p.marketplaceFeeCents / 100 } : {}),
-      back_urls: { success: p.backUrl, pending: p.backUrl, failure: p.backUrl },
-      auto_return: 'approved',
-      ...(p.notificationUrl ? { notification_url: p.notificationUrl } : {}),
-      ...(p.expiresAt ? {
-        expires: true,
-        expiration_date_to: p.expiresAt.toISOString(),
-        date_of_expiration: p.expiresAt.toISOString(), // Pix gerado vence junto com a reserva
-      } : {}),
-      ...(statementDescriptorOf(p.statementDescriptor) ? { statement_descriptor: statementDescriptorOf(p.statementDescriptor) } : {}),
-      payment_methods: { excluded_payment_types: [{ id: 'ticket' }], ...(p.maxInstallments && p.maxInstallments > 0 ? { installments: Math.min(12, p.maxInstallments) } : {}) }, // sem boleto: demora a compensar e a reserva expira
-    }, p.accessToken, p.idem ?? `pref-${p.orderId}`);
-    const initPoint = String(r.init_point ?? '');
+    const items = p.items.map((i, k) => ({ title: i.title.slice(0, 250), quantity: i.quantity, unitCents: i.unitCents, description: (i.description ?? i.title).slice(0, 250), categoryId: i.categoryId ?? 'others', code: String(k + 1) }));
+    const total = items.reduce((n, i) => n + i.unitCents * i.quantity, 0);
+    const money = (c: number) => (c / 100).toFixed(2);
+    const online = {
+      success_url: p.backUrl, failure_url: p.backUrl, pending_url: p.backUrl, auto_return: 'approved',
+    };
+    const minimal = {
+      type: 'online', processing_mode: 'manual', total_amount: money(total), external_reference: p.orderId,
+      items: items.map((i) => ({ title: i.title, unit_price: money(i.unitCents), quantity: i.quantity })),
+      ...(p.marketplaceFeeCents ? { marketplace_fee: money(p.marketplaceFeeCents) } : {}),
+      ...(p.payer.email ? { payer: { email: p.payer.email } } : {}),
+      config: { online },
+    };
+    const descriptor = statementDescriptorOf(p.statementDescriptor);
+    const minutes = p.expiresAt ? Math.max(30, Math.ceil((p.expiresAt.getTime() - Date.now()) / 60_000)) : 0;
+    const full = {
+      ...minimal,
+      description: items[0]?.title ?? '',
+      items: items.map((i) => ({ title: i.title, unit_price: money(i.unitCents), quantity: i.quantity, description: i.description, category_id: i.categoryId, external_code: i.code })),
+      ...(p.payer.email ? { payer: orderPayerOf(p.payer) } : {}),
+      ...(minutes ? { expiration_time: `PT${minutes}M` } : {}), // Pix gerado vence junto com a reserva
+      config: {
+        ...(descriptor ? { statement_descriptor: descriptor } : {}),
+        online: { ...online, transaction_security: { validation: 'on_fraud_risk', liability_shift: 'required' } },
+        payment_method: { not_allowed_types: ['ticket'], ...(p.maxInstallments && p.maxInstallments > 0 ? { max_installments: Math.min(12, p.maxInstallments) } : {}) }, // sem boleto: demora e a reserva expira
+      },
+    };
+    const idem = p.idem ?? `pref-${p.orderId}`;
+    let r: Record<string, unknown>;
+    try { r = await this.call<Record<string, unknown>>('POST', '/v1/orders', full, p.accessToken, idem); }
+    catch (e) {
+      if (!(e instanceof BadGatewayException) || !/\((400|422)\)/.test(e.message)) throw e;
+      this.logger.warn(`Ordem de checkout recusada com os campos opcionais; tentando só com o essencial: ${e.message}`);
+      r = await this.call<Record<string, unknown>>('POST', '/v1/orders', minimal, p.accessToken, `${idem}-b`);
+    }
+    const initPoint = String(r.checkout_url ?? '');
     if (!/^https:\/\//.test(initPoint)) throw new BadGatewayException('O Mercado Pago não devolveu o link de pagamento');
     return { id: String(r.id ?? ''), initPoint };
   }
@@ -248,6 +304,7 @@ export class MercadoPagoClient {
 
   /** Consulta o pagamento direto no Mercado Pago (fonte da verdade; nunca confie no webhook ou no redirecionamento). */
   async payment(id: string, accessToken: string): Promise<MpPayment> {
+    if (isOrderId(id)) return orderAsPayment(await this.call<Record<string, any>>('GET', `/v1/orders/${encodeURIComponent(id)}`, undefined, accessToken));
     const r = await this.call<Record<string, any>>('GET', `/v1/payments/${encodeURIComponent(id)}`, undefined, accessToken);
     const fee = Array.isArray(r.fee_details) ? r.fee_details.filter((f: any) => f?.type === 'application_fee').reduce((s: number, f: any) => s + cents(f.amount), 0) : 0;
     return {
@@ -259,6 +316,7 @@ export class MercadoPagoClient {
 
   /** Devolve o pagamento inteiro ao comprador (a comissão do marketplace volta junto). */
   async refund(paymentId: string, accessToken: string, idem: string): Promise<void> {
+    if (isOrderId(paymentId)) { await this.call('POST', `/v1/orders/${encodeURIComponent(paymentId)}/refund`, {}, accessToken, idem); return; }
     await this.call('POST', `/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {}, accessToken, idem);
   }
 

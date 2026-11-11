@@ -1,4 +1,5 @@
 import { ConflictException, HttpException, HttpStatus, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
@@ -295,7 +296,7 @@ export class BillingService {
     if (!verifySigned('invoice', id, q.s)) throw new UnauthorizedException('Token inválido');
     const topic = String(q.type ?? q.topic ?? body?.type ?? body?.topic ?? '');
     const paymentId = String(q['data.id'] ?? body?.data?.id ?? (topic === 'payment' ? q.id ?? '' : ''));
-    if (topic !== 'payment' || !/^\d{1,20}$/.test(paymentId)) return { received: true, outcome: 'ignored' };
+    if (topic !== 'payment' || !MP_PAYMENT_ID_RE.test(paymentId)) return { received: true, outcome: 'ignored' };
     if (headers.signature && !this.mp.verifySignature(paymentId, headers.requestId, headers.signature)) throw new UnauthorizedException('Assinatura inválida');
     const outcome = await this.confirm(id, paymentId);
     await this.eventModel
@@ -313,12 +314,13 @@ export class BillingService {
   }
 
   /** Consulta o pagamento no Mercado Pago (conta do Balcão) e baixa a fatura se estiver aprovado com o valor certo. */
-  private async confirm(invoiceId: string, paymentId: string): Promise<string> {
+  /** Público para o webhook único de ordens (store/mp-orders-webhook.service.ts). */
+  async confirm(invoiceId: string, paymentId: string): Promise<string> {
     const invoice = await crossTenant(this.invoiceModel, 'pagamento: fatura vinda do webhook (token assinado) ou da empresa já conferida').findById(invoiceId);
     if (!invoice) return 'invoice_not_found';
     if (invoice.status === 'paid') return 'already_paid';
     if (invoice.status !== 'pending') return 'ignored';
-    if (!/^\d{1,20}$/.test(paymentId)) return 'unverifiable';
+    if (!MP_PAYMENT_ID_RE.test(paymentId)) return 'unverifiable';
 
     const pay = await this.mp.payment(paymentId, this.mp.platformToken);
     if (pay.externalReference !== invoiceId) { this.logger.warn(`Pagamento ${paymentId} não é da fatura ${invoiceId}`); return 'not_this_invoice'; }

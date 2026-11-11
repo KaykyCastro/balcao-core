@@ -78,6 +78,9 @@ export class Store {
     font: { type: String, enum: [...FONT_KEYS], default: 'modern' },
     bodyFont: { type: String, enum: [...BODY_FONT_KEYS], default: 'modern' },
     corners: { type: String, enum: ['rounded', 'soft', 'square'], default: 'rounded' },
+    logoSize: { type: String, enum: ['sm', 'md', 'lg', 'xl'], default: 'md' },
+    logoShape: { type: String, enum: ['original', 'rounded', 'circle'], default: 'original' },
+    logoName: { type: Boolean, default: true },
     columns: { type: Number, enum: [2, 3, 4], default: 3 },
     hero: { type: String, enum: ['carousel', 'banner', 'simple', 'split', 'duo'], default: 'banner' },
     autoplaySec: { type: Number, default: 5 },
@@ -89,7 +92,7 @@ export class Store {
     /** Parcelas sem juros que a loja oferece (0 = não mostra "ou 6x de..." no preço). */
     installments: { type: Number, default: 0, min: 0, max: 12 },
   }))
-  theme: { accent: string; background: 'light' | 'warm' | 'dark' | 'custom'; bgColor: string; font: string; bodyFont: string; corners: 'rounded' | 'soft' | 'square'; columns: 2 | 3 | 4; hero: 'carousel' | 'banner' | 'simple' | 'split' | 'duo'; autoplaySec: number; heroHeight: 'compact' | 'large'; showStock: boolean; layout: 'classic' | 'fashion' | 'beauty' | 'market' | 'menu' | 'bistro' | 'delivery' | 'atelier' | 'jewel' | 'street' | 'boutique' | 'retail' | 'glow'; header?: 'classic' | 'editorial' | 'centered' | 'split' | 'bar'; installments?: number };
+  theme: { accent: string; background: 'light' | 'warm' | 'dark' | 'custom'; bgColor: string; font: string; bodyFont: string; corners: 'rounded' | 'soft' | 'square'; logoSize?: 'sm' | 'md' | 'lg' | 'xl'; logoShape?: 'original' | 'rounded' | 'circle'; logoName?: boolean; columns: 2 | 3 | 4; hero: 'carousel' | 'banner' | 'simple' | 'split' | 'duo'; autoplaySec: number; heroHeight: 'compact' | 'large'; showStock: boolean; layout: 'classic' | 'fashion' | 'beauty' | 'market' | 'menu' | 'bistro' | 'delivery' | 'atelier' | 'jewel' | 'street' | 'boutique' | 'retail' | 'glow'; header?: 'classic' | 'editorial' | 'centered' | 'split' | 'bar'; installments?: number };
 
   @Prop({ type: [{ video: String, productId: String, title: String, _id: false }], default: [] })
   reels: StoreReel[];

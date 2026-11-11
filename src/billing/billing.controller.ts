@@ -15,8 +15,8 @@ class NotifyDto {
 }
 
 class ConfirmDto {
-  /** `payment_id` que o Mercado Pago devolve na volta do checkout. */
-  @IsString() @Matches(/^\d{1,20}$/)
+  /** `order_id` (API de Orders) ou `payment_id` que o Mercado Pago devolve na volta do checkout. */
+  @IsString() @Matches(/^(\d{1,20}|ORD[A-Z0-9]{10,40})$/)
   paymentId: string;
 }
 

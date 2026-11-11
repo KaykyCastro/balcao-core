@@ -20,6 +20,10 @@ class ThemeDto {
   @IsOptional() @IsIn([...FONT_KEYS]) font?: string;
   @IsOptional() @IsIn([...BODY_FONT_KEYS]) bodyFont?: string;
   @IsOptional() @IsIn(['rounded', 'soft', 'square']) corners?: string;
+  /** Logo no cabeçalho e no rodapé: tamanho, formato (original = proporção da própria logo, sem corte) e nome ao lado. */
+  @IsOptional() @IsIn(['sm', 'md', 'lg', 'xl']) logoSize?: string;
+  @IsOptional() @IsIn(['original', 'rounded', 'circle']) logoShape?: string;
+  @IsOptional() @IsBoolean() logoName?: boolean;
   @IsOptional() @IsIn([2, 3, 4]) columns?: number;
   @IsOptional() @IsIn(['carousel', 'banner', 'simple', 'split', 'duo']) hero?: string;
   @IsOptional() @IsInt() @Min(0) @Max(20) autoplaySec?: number;

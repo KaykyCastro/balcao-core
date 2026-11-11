@@ -49,7 +49,7 @@ export class TabPublicController {
 
   @Get('store/:slug/tabs/:id')
   view(@Param('slug') slug: string, @Param('id', ParseMongoIdPipe) id: string, @Query('t') t: string, @Query('payment_id') paymentId?: string) {
-    return this.tabs.publicView(slug, id, String(t ?? '').slice(0, 200), paymentId ? String(paymentId).slice(0, 24) : undefined);
+    return this.tabs.publicView(slug, id, String(t ?? '').slice(0, 200), paymentId ? String(paymentId).slice(0, 44) : undefined);
   }
 
   @Throttle({ default: { limit: 20, ttl: 60_000 } })

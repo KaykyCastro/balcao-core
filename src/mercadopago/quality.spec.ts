@@ -60,16 +60,31 @@ describe('Checkout Pro: itens de qualidade', () => {
     expect(payerOf({ name: 'Ana', document: '123' }).identification).toBeUndefined();
   });
 
-  it('preferência leva categoria e descrição do item, nome na fatura sem acento e o limite de parcelas', async () => {
-    let body: any;
-    global.fetch = jest.fn(async (_u: string, init: any) => { body = JSON.parse(init.body); return { ok: true, status: 201, json: async () => ({ id: 'P1', init_point: 'https://mp/x' }) } as any; }) as any;
+  it('checkout vira ordem (API de Orders): itens, pagador, nome na fatura, parcelas, sem boleto, URLs de retorno', async () => {
+    let body: any; let url = '';
+    global.fetch = jest.fn(async (u: string, init: any) => { url = u; body = JSON.parse(init.body); return { ok: true, status: 201, json: async () => ({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://www.mercadopago.com.br/checkout/v1/redirect?order_id=ORD01ABCDEFGHIJKLMN' }) } as any; }) as any;
     const mp = new MercadoPagoClient(new ConfigService({}));
-    await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Batom', quantity: 2, unitCents: 1990 }], payer: { name: 'Ana Souza', email: 'a@x.com' }, backUrl: 'https://x/y', statementDescriptor: 'Pele Boa Cosméticos', maxInstallments: 6 });
-    expect(body.items[0]).toMatchObject({ id: '1', title: 'Batom', description: 'Batom', category_id: 'others', quantity: 2, unit_price: 19.9 });
-    expect(body.statement_descriptor).toBe('PELE BOA COSMETICOS');
-    expect(body.payment_methods.installments).toBe(6);
-    expect(body.payer).toMatchObject({ name: 'Ana', surname: 'Souza', email: 'a@x.com' });
-    expect(body.back_urls.success).toBe('https://x/y');
-    expect(body.external_reference).toBe('o1');
+    const r = await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Batom', quantity: 2, unitCents: 1990 }], payer: { name: 'Ana Souza', email: 'a@x.com', document: '12345678909' }, backUrl: 'https://x/y', statementDescriptor: 'Pele Boa Cosméticos', maxInstallments: 6, marketplaceFeeCents: 120 });
+    expect(url).toMatch(/\/v1\/orders$/);
+    expect(r).toEqual({ id: 'ORD01ABCDEFGHIJKLMN', initPoint: expect.stringMatching(/^https:/) });
+    expect(body).toMatchObject({ type: 'online', processing_mode: 'manual', total_amount: '39.80', external_reference: 'o1', marketplace_fee: '1.20' });
+    expect(body.items[0]).toMatchObject({ title: 'Batom', unit_price: '19.90', quantity: 2, description: 'Batom', category_id: 'others' });
+    expect(body.payer).toMatchObject({ email: 'a@x.com', first_name: 'Ana', last_name: 'Souza', identification: { type: 'CPF', number: '12345678909' } });
+    expect(body.config.statement_descriptor).toBe('PELE BOA COSMETICOS');
+    expect(body.config.payment_method).toEqual({ not_allowed_types: ['ticket'], max_installments: 6 });
+    expect(body.config.online).toMatchObject({ success_url: 'https://x/y', auto_return: 'approved' });
+  });
+
+  it('se o Mercado Pago recusar um campo opcional (400), a ordem sai só com o essencial', async () => {
+    const bodies: any[] = [];
+    global.fetch = jest.fn(async (_u: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return bodies.length === 1 ? { ok: false, status: 400, json: async () => ({ message: 'invalid' }) } as any : { ok: true, status: 201, json: async () => ({ id: 'ORD01ABCDEFGHIJKLMN', checkout_url: 'https://mp/x' }) } as any;
+    }) as any;
+    const mp = new MercadoPagoClient(new ConfigService({}));
+    await mp.createPreference({ accessToken: 'T', orderId: 'o1', items: [{ title: 'Taxa', quantity: 1, unitCents: 500 }], payer: { name: 'Mesa 4' }, backUrl: 'https://x/y' });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].config).toEqual({ online: expect.objectContaining({ success_url: 'https://x/y' }) });
+    expect(bodies[1].payer).toBeUndefined(); // sem e-mail não manda pagador (o e-mail é obrigatório quando vai)
   });
 });

@@ -87,7 +87,8 @@ export class OrderAccessDto {
 export class OrderConfirmDto {
   @IsString() @Length(20, 64) t: string;
   /** `payment_id` que o Mercado Pago devolve na volta do checkout. */
-  @IsString() @Matches(/^\d{1,20}$/) paymentId: string;
+  /** payment_id antigo (número) ou order_id da API de Orders (ORD…). */
+  @IsString() @Matches(/^(\d{1,20}|ORD[A-Z0-9]{10,40})$/) paymentId: string;
 }
 
 export class OrderListQueryDto extends PaginationQueryDto {

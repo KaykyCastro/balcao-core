@@ -9,25 +9,25 @@ describe('MercadoPagoClient', () => {
   afterEach(() => jest.restoreAllMocks());
   const mk = (o: Record<string, string> = {}) => new MercadoPagoClient({ get: (k: string) => ({ MP_ACCESS_TOKEN: 'APP_USR-balcao', ...o })[k] } as any);
 
-  it('fatura: preferência na conta do Balcão, sem comissão, valor em reais e só Pix/cartão', async () => {
-    const f = jest.spyOn(global, 'fetch').mockImplementation(() => okJson({ id: 'pref1', init_point: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=pref1' }));
+  it('fatura: ordem de Checkout Pro (API de Orders) na conta do Balcão, sem comissão, valor em texto e sem boleto', async () => {
+    const f = jest.spyOn(global, 'fetch').mockImplementation(() => okJson({ id: 'ORD01INV0000000001', checkout_url: 'https://www.mercadopago.com.br/checkout/v1/redirect?order_id=ORD01INV0000000001' }));
     const c = mk();
     const r = await c.createPreference({ accessToken: c.platformToken, orderId: 'inv1', items: [{ title: 'Taxa', quantity: 1, unitCents: 4000 }], payer: { name: 'Loja', email: 'l@x.com' }, backUrl: 'https://app/x', notificationUrl: 'https://api/w' });
-    expect(r).toEqual({ id: 'pref1', initPoint: expect.stringContaining('https://') });
+    expect(r).toEqual({ id: 'ORD01INV0000000001', initPoint: expect.stringContaining('https://') });
     const [url, init] = f.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://api.mercadopago.com/checkout/preferences');
+    expect(url).toBe('https://api.mercadopago.com/v1/orders');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer APP_USR-balcao');
     const body = JSON.parse(init.body as string);
-    expect(body).toMatchObject({ external_reference: 'inv1', items: [{ unit_price: 40, quantity: 1, currency_id: 'BRL' }], notification_url: 'https://api/w', payment_methods: { excluded_payment_types: [{ id: 'ticket' }] } });
+    expect(body).toMatchObject({ type: 'online', processing_mode: 'manual', total_amount: '40.00', external_reference: 'inv1', items: [{ unit_price: '40.00', quantity: 1 }], config: { payment_method: { not_allowed_types: ['ticket'] } } });
     expect(body).not.toHaveProperty('marketplace_fee');
-    expect(body).not.toHaveProperty('expires');
+    expect(body).not.toHaveProperty('expiration_time');
   });
 
   it('rejeita link não-https, erro HTTP e falha de rede; sem token: 503', async () => {
     const f = jest.spyOn(global, 'fetch');
     const c = mk();
     const p = { accessToken: 'x', orderId: 'o', items: [], payer: { name: 'a', email: 'b' }, backUrl: 'https://x' };
-    f.mockImplementation(() => okJson({ init_point: 'javascript:alert(1)' }));
+    f.mockImplementation(() => okJson({ checkout_url: 'javascript:alert(1)' }));
     await expect(c.createPreference(p)).rejects.toMatchObject({ status: 502 });
     f.mockImplementation(() => okJson({}, 500));
     await expect(c.createPreference(p)).rejects.toMatchObject({ status: 502 });

@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, HttpCode, NotFoundException, Param, Post, Query, Req, Res } from '@nestjs/common';
+import { MpOrdersWebhookService } from './mp-orders-webhook.service';
 import type { Request, Response } from 'express';
 import { ShopperService } from '../shopper/shopper.service';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
@@ -54,6 +55,7 @@ export class StorefrontController {
     private readonly market: MarketplaceService,
     private readonly rewards: RewardsService,
     private readonly protection: ProtectionService,
+    private readonly ordersHook: MpOrdersWebhookService,
   ) {}
 
   /** Página "Lojas no Balcão". */
@@ -305,6 +307,17 @@ export class StorefrontController {
   @Post('store/:slug/orders/:id/dispute') @HttpCode(200)
   async dispute(@Param('slug') slug: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: PublicDisputeDto) {
     return this.protection.openDispute(await this.orders.byToken(slug, id, dto.t), dto.reason, dto.message);
+  }
+
+  /**
+   * Webhook único das ordens de Checkout Pro (API de Orders): é o endereço cadastrado no painel da aplicação, evento
+   * "Order". Vale para faturas do Balcão, pedidos da loja e comandas (ver mp-orders-webhook.service.ts).
+   */
+  @SkipThrottle()
+  @Post('mercadopago/webhook')
+  @HttpCode(200)
+  ordersWebhook(@Query() q: Record<string, unknown>, @Body() body: Record<string, unknown> | undefined, @Headers('x-signature') signature?: string, @Headers('x-request-id') requestId?: string) {
+    return this.ordersHook.handle(q, (body ?? {}) as Record<string, any>, { signature, requestId });
   }
 
   /** Webhook do Mercado Pago para pedidos da loja online (token por pedido na URL + consulta do pagamento). */
