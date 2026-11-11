@@ -2,7 +2,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize, ArrayNotEmpty, IsArray, IsBoolean, IsEmail, IsIn, IsInt, IsMongoId, IsOptional, IsString, Length, Matches, Max, MaxLength, Min, MinLength, ValidateNested,
 } from 'class-validator';
-import { Equals } from 'class-validator';
+import { Equals, IsISO8601 } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ORDER_STATUSES } from '../store.rules';
 
@@ -164,4 +164,9 @@ export class LabelDto {
 }
 export class LabelsPrintDto {
   @IsArray() @ArrayNotEmpty() @ArrayMaxSize(50) @IsMongoId({ each: true }) ids: string[];
+}
+
+/** Impressão automática: a partir de quando este computador imprime pedidos (ISO 8601). */
+export class PrintQueueDto {
+  @IsISO8601() since: string;
 }

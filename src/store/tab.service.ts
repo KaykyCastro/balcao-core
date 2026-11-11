@@ -459,6 +459,36 @@ export class TabService {
     };
   }
 
+  // ------------------------------------------------------------------ impressão automática (cozinha)
+
+  /** Itens novos das contas abertas, ainda não impressos, lançados depois de `since` (no máximo 12 h atrás). */
+  async printQueue(eid: string, since: Date) {
+    const floor = new Date(Math.max(since.getTime(), Date.now() - 12 * 3_600_000));
+    const store = await this.stores.getOrCreate(eid);
+    const tabs = await this.tabs.find({ enterpriseId: new Types.ObjectId(eid), status: 'open', items: { $elemMatch: { status: 'new', printedAt: { $exists: false }, at: { $gte: floor } } } }).limit(20).lean();
+    return {
+      items: tabs.map((t) => ({
+        id: String(t._id), table: t.table, number: t.number, name: t.name, label: this.label(store),
+        items: t.items.filter((i) => i.status === 'new' && !i.printedAt && i.at >= floor)
+          .map((i) => ({ id: String(i._id), name: i.productName, quantity: i.quantity, note: i.note ?? '', options: i.options ?? [], by: i.by, at: i.at })),
+      })).filter((t) => t.items.length),
+    };
+  }
+
+  /** Reserva itens para imprimir: devolve só os que este computador conseguiu reservar. */
+  async claimPrint(eid: string, id: string, ids: string[]) {
+    const claimed: string[] = [];
+    for (const iid of ids.slice(0, 50)) {
+      if (!Types.ObjectId.isValid(iid)) continue;
+      const r = await this.tabs.updateOne(
+        { _id: new Types.ObjectId(id), enterpriseId: new Types.ObjectId(eid), items: { $elemMatch: { _id: new Types.ObjectId(iid), printedAt: { $exists: false } } } },
+        { $set: { 'items.$.printedAt': new Date() } },
+      );
+      if (r.modifiedCount) claimed.push(iid);
+    }
+    return { claimed };
+  }
+
   async summary(eid: string) {
     const eoid = new Types.ObjectId(eid);
     const [open, calls, newItems] = await Promise.all([

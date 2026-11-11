@@ -175,6 +175,10 @@ export class Order {
   /** Lojista já abriu o pedido (contador de "novos"). */
   @Prop({ default: false })
   seen: boolean;
+
+  /** Impresso pela impressão automática de pedidos (um computador reserva e imprime; os outros pulam). */
+  @Prop({ type: Date, default: null })
+  printedAt: Date | null;
 }
 
 export const OrderSchemaFactory = SchemaFactory.createForClass(Order);

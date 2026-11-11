@@ -59,3 +59,8 @@ export class TabMoveDto {
 export class TabRenameDto {
   @IsString() @MinLength(1) @MaxLength(40) name: string;
 }
+
+/** Itens que este computador quer imprimir na cozinha. */
+export class TabPrintClaimDto {
+  @IsArray() @ArrayMaxSize(50) @IsMongoId({ each: true }) ids: string[];
+}

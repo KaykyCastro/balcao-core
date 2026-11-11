@@ -1,11 +1,12 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
+import { PrintQueueDto } from './dto/order.dto';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { CurrentEnterprise } from '../common/decorators/current-enterprise.decorator';
 import { AllowWhenBlocked } from '../common/decorators/allow-when-blocked.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
 import { TabService } from './tab.service';
-import { TabByDto, TabCallDto, TabCancelDto, TabCancelItemDto, TabLinesDto, TabLinesPublicDto, TabMoveDto, TabOpenDto, TabOpenPublicDto, TabRenameDto, TabServeDto, TabServiceDto, TabSettleDto, TabTokenDto } from './dto/tab.dto';
+import { TabByDto, TabCallDto, TabCancelDto, TabCancelItemDto, TabLinesDto, TabLinesPublicDto, TabMoveDto, TabOpenDto, TabOpenPublicDto, TabRenameDto, TabServeDto, TabServiceDto, TabSettleDto, TabTokenDto, TabPrintClaimDto } from './dto/tab.dto';
 
 type Rq = { user?: { email?: string; staff?: { id: string; name: string; role: string } } };
 /** Nome no histórico: o funcionário logado; o dono pode digitar o nome do garçom. */
@@ -19,6 +20,9 @@ export class TabController {
 
   @AllowWhenBlocked() @Get() board(@CurrentEnterprise() eid: string) { return this.tabs.board(eid); }
   @AllowWhenBlocked() @Get('summary') summary(@CurrentEnterprise() eid: string) { return this.tabs.summary(eid); }
+  /** Impressão automática na cozinha: itens novos das contas, e a reserva de quem vai imprimir. */
+  @AllowWhenBlocked() @Get('print-queue') printQueue(@CurrentEnterprise() eid: string, @Query() q: PrintQueueDto) { return this.tabs.printQueue(eid, new Date(q.since)); }
+  @AllowWhenBlocked() @Post(':id/print-claim') @HttpCode(200) claimPrint(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: TabPrintClaimDto) { return this.tabs.claimPrint(eid, id, dto.ids); }
   @Post() open(@CurrentEnterprise() eid: string, @Body() dto: TabOpenDto, @Req() req: Rq) { return this.tabs.openStaff(eid, dto, st(req)); }
   @Post(':id/items') @HttpCode(200) add(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: TabLinesDto, @Req() req: Rq) { return this.tabs.staffAdd(eid, id, dto.items, st(req)); }
   @AllowWhenBlocked() @Post(':id/serve') @HttpCode(200) serve(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: TabServeDto, @Req() req: Rq) { return this.tabs.serve(eid, id, dto.itemIds, st(req)); }

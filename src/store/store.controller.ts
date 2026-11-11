@@ -3,7 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { StoreService } from './store.service';
 import { OrderService } from './order.service';
 import { MpCallbackDto, SlugQueryDto, StoreUpdateDto, TestQuoteDto, VisibilityDto, StorePageDto } from './dto/store.dto';
-import { CollectDto, LabelDto, LabelsPrintDto, OrderCancelDto, OrderListQueryDto, OrderStatusDto, ReplyDto } from './dto/order.dto';
+import { CollectDto, LabelDto, LabelsPrintDto, OrderCancelDto, OrderListQueryDto, OrderStatusDto, ReplyDto, PrintQueueDto } from './dto/order.dto';
 import { LogisticsService } from './logistics.service';
 import { ProtectionService } from './protection.service';
 import { TabService } from './tab.service';
@@ -113,6 +113,19 @@ export class OrderController {
     // Mesas (modo cardápio): chamados de garçom e itens novos entram no aviso do menu.
     const [o, tables] = await Promise.all([this.orders.summary(eid), this.tabs.summary(eid)]);
     return { ...o, tables };
+  }
+
+  /** Impressão automática (cada computador que ligou a opção): pedidos novos ainda não impressos. */
+  @Get('print-queue')
+  printQueue(@CurrentEnterprise() eid: string, @Query() q: PrintQueueDto) {
+    return this.orders.printQueue(eid, new Date(q.since));
+  }
+
+  /** Reserva o pedido para este computador imprimir (os outros computadores pulam). */
+  @Post(':id/print-claim')
+  @HttpCode(200)
+  claimPrint(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) {
+    return this.orders.claimPrint(eid, id);
   }
 
   /** PDF com as etiquetas dos pedidos escolhidos (Melhor Envio). */

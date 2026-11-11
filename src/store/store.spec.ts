@@ -108,6 +108,7 @@ function setup(over: { linkFails?: boolean; refundFails?: boolean; promo?: { pri
       if (st?.$in && !st.$in.includes(d.status)) return null;
       if ('saleId' in q && d.saleId !== q.saleId) return null;
       if ('stockReleased' in q && d.stockReleased !== q.stockReleased) return null;
+      if ('printedAt' in q && (d.printedAt ?? null) !== q.printedAt) return null;
       const before = { ...d };
       for (const [k, v] of Object.entries(u.$set ?? {})) { if (k.includes('.')) { const [a, b] = k.split('.'); d[a] = { ...d[a], [b]: v }; } else d[k] = v; }
       if (u.$push?.history) d.history = [...(d.history ?? []), u.$push.history];
@@ -230,6 +231,16 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
       await expect(t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, customer, shippingOptionId: 'pickup', items: [{ productId: String(prodA._id), quantity: 1, options: pick('mu') }] })).rejects.toMatchObject({ status: 422 });
       expect(t.products.decreaseQuantity).not.toHaveBeenCalled();
     } finally { delete (prodA as any).options; }
+  });
+
+  it('impressão automática: só o primeiro computador reserva o pedido; pedido não pago não imprime', async () => {
+    const t = setup();
+    const r = await t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+    expect(await t.svc.claimPrint(String(eid), r.orderId)).toEqual({ claimed: false }); // ainda aguardando pagamento
+    t.docs.get(r.orderId).status = 'paid';
+    expect(await t.svc.claimPrint(String(eid), r.orderId)).toEqual({ claimed: true });
+    expect(await t.svc.claimPrint(String(eid), r.orderId)).toEqual({ claimed: false }); // o outro computador pula
+    expect(t.docs.get(r.orderId).printedAt).toBeInstanceOf(Date);
   });
 
   it('checkout: sem estoque não cria pedido', async () => {

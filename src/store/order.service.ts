@@ -35,6 +35,9 @@ import { crossTenant } from '../common/security/tenant-guard.plugin';
 const SCOPE = 'store-order';
 const fmt = (c: number) => (c / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
+/** Pedidos que a impressão automática imprime: pagos ou confirmados (pagar na entrega), também se já foram para o preparo. */
+const PRINTABLE: OrderStatus[] = ['paid', 'confirmed', 'preparing'];
+
 /** Linha do carrinho como chega do site: produto, quantidade, adicionais escolhidos e observação. */
 export interface CartLineInput { productId: string; quantity: number; options?: { g: string; i: string; q: number }[]; note?: string }
 
@@ -467,6 +470,28 @@ export class OrderService {
     return { items: rows.map((o) => this.present(o)), total, page: q.page, limit: q.limit };
   }
 
+  // ------------------------------------------------------------------ impressão automática
+
+  /**
+   * Pedidos para a impressão automática: pagos (ou confirmados, no pagar na entrega), ainda não impressos e feitos
+   * depois de `since` (quando o computador ligou a opção; no máximo 24 h atrás, para não imprimir pedidos antigos).
+   */
+  async printQueue(eid: string, since: Date) {
+    const floor = new Date(Math.max(since.getTime(), Date.now() - 86_400_000));
+    const rows = await this.orders.find({ enterpriseId: new Types.ObjectId(eid), status: { $in: PRINTABLE }, printedAt: null, createdAt: { $gte: floor } })
+      .sort({ createdAt: 1 }).limit(10);
+    return { items: rows.map((o) => this.present(o)) };
+  }
+
+  /** Reserva o pedido para imprimir: só o primeiro computador consegue (os outros recebem `claimed: false`). */
+  async claimPrint(eid: string, id: string) {
+    const r = await this.orders.findOneAndUpdate(
+      { _id: new Types.ObjectId(id), enterpriseId: new Types.ObjectId(eid), status: { $in: PRINTABLE }, printedAt: null },
+      { $set: { printedAt: new Date() } }, { projection: { _id: 1 } },
+    );
+    return { claimed: !!r };
+  }
+
   async summary(eid: string) {
     const rows = await this.orders.aggregate<{ _id: OrderStatus; n: number }>([
       { $match: { enterpriseId: new Types.ObjectId(eid) } },
@@ -635,7 +660,7 @@ export class OrderService {
       ...base, customer: { name: o.customer.name, email: o.customer.email, phone: o.customer.phone, ...(o.customer.document ? { document: o.customer.document } : {}) }, notes: o.notes, // sem o índice cego do telefone payment: { provider: 'mercadopago', method: o.payment?.method ?? null, paymentId: o.payment?.paymentId ?? null, paidAmountCents: o.payment?.paidAmountCents ?? null, refundedAt: o.payment?.refundedAt ?? null },
       fee: { source: o.source ?? 'store', rateBps: o.feeRateBps ?? 0, cents: o.feeCents ?? 0, charged: !!o.feeCharged },
       customerId: o.customerId ? String(o.customerId) : null, account: !!o.shopperId,
-      stockIssue: o.stockIssue, refundNeeded: o.refundNeeded, cancelReason: o.cancelReason, seen: o.seen, saleId: o.saleId ? String(o.saleId) : null,
+      stockIssue: o.stockIssue, refundNeeded: o.refundNeeded, cancelReason: o.cancelReason, seen: o.seen, printedAt: o.printedAt ?? null, saleId: o.saleId ? String(o.saleId) : null,
     };
   }
 }

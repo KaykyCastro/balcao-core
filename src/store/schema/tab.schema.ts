@@ -25,6 +25,8 @@ export interface TabItem {
   /** new = cozinha/bar ainda não entregou; served = entregue na mesa; cancelled = tirado da conta (estoque devolvido). */
   status: TabItemStatus;
   cancelReason?: string;
+  /** Impresso na cozinha pela impressão automática. */
+  printedAt?: Date;
 }
 
 /**
