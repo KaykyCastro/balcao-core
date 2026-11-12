@@ -1,5 +1,5 @@
 import { BadGatewayException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
-import { MercadoPagoConfig, MercadoPagoError, Order as MpOrderClient, Payment as MpPaymentClient, PaymentRefund as MpRefundClient, User as MpUserClient } from 'mercadopago';
+import { MercadoPagoConfig, MercadoPagoError, OAuth as MpOAuthClient, Order as MpOrderClient, Payment as MpPaymentClient, PaymentRefund as MpRefundClient, PreApproval as MpPreApprovalClient, User as MpUserClient } from 'mercadopago';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
 
@@ -212,12 +212,13 @@ export class MercadoPagoClient {
 
   async exchangeCode(code: string, codeVerifier?: string): Promise<MpTokens> {
     const { clientId, clientSecret, redirectUri } = this.app();
-    return this.tokens(await this.call<Record<string, unknown>>('POST', '/oauth/token', { client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: redirectUri, ...(codeVerifier ? { code_verifier: codeVerifier } : {}) }));
+    // SDK oficial (o corpo aceita campos extras: o code_verifier do PKCE vai junto).
+    return this.tokens(await this.sdk('/oauth/token', () => new MpOAuthClient(this.sdkConfig(this.platformToken)).create({ body: { client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirectUri, ...(codeVerifier ? { code_verifier: codeVerifier } : {}) } as never }) as Promise<unknown>) as Record<string, unknown>);
   }
 
   async refresh(refreshToken: string): Promise<MpTokens> {
     const { clientId, clientSecret } = this.app();
-    return this.tokens(await this.call<Record<string, unknown>>('POST', '/oauth/token', { client_id: clientId, client_secret: clientSecret, grant_type: 'refresh_token', refresh_token: refreshToken }));
+    return this.tokens(await this.sdk('/oauth/token', () => new MpOAuthClient(this.sdkConfig(this.platformToken)).refresh({ body: { client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken } }) as Promise<unknown>) as Record<string, unknown>);
   }
 
   async me(accessToken: string): Promise<{ id: string; nickname: string; email: string }> {
@@ -236,6 +237,10 @@ export class MercadoPagoClient {
     return new MercadoPagoConfig({ accessToken, options: { timeout: 15_000, maxRetries: 2, retryOn: [429, 500, 502, 503, 504], ...(platformId ? { platformId } : {}) } });
   }
   private sdkOrders(accessToken: string) { return new MpOrderClient(this.sdkConfig(accessToken)); }
+  /** Cria qualquer ordem (Pix, maquininha) pelo SDK, com a chave de idempotência de quem chamou. */
+  private orderCreate(body: Record<string, unknown>, accessToken: string, idem: string) {
+    return this.sdk('/v1/orders', () => this.sdkOrders(accessToken).create({ body: body as never, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>) as Promise<Record<string, any>>;
+  }
   private async sdk<T>(path: string, run: () => Promise<T>): Promise<T> {
     try { return await run(); }
     catch (e) {
@@ -335,20 +340,20 @@ export class MercadoPagoClient {
 
   /** Cria a assinatura mensal (fica 'pending' até o lojista autorizar o cartão no Mercado Pago). */
   async createPreapproval(p: { reason: string; externalReference: string; payerEmail: string; amountCents: number; startDate: Date; backUrl: string }): Promise<MpPreapproval> {
-    const r = await this.call<Record<string, any>>('POST', '/preapproval', {
+    const r = await this.sdk('/preapproval', () => new MpPreApprovalClient(this.sdkConfig(this.platformToken)).create({ body: {
       reason: p.reason.slice(0, 120), external_reference: p.externalReference, payer_email: p.payerEmail, back_url: p.backUrl, status: 'pending',
       auto_recurring: { frequency: 1, frequency_type: 'months', start_date: p.startDate.toISOString(), transaction_amount: p.amountCents / 100, currency_id: 'BRL' },
-    }, this.platformToken);
+    } as never }) as Promise<unknown>) as Record<string, any>;
     return preapproval(r);
   }
   async getPreapproval(id: string): Promise<MpPreapproval> {
-    return preapproval(await this.call<Record<string, any>>('GET', `/preapproval/${encodeURIComponent(id)}`, undefined, this.platformToken));
+    return preapproval(await this.sdk(`/preapproval/${id}`, () => new MpPreApprovalClient(this.sdkConfig(this.platformToken)).get({ id }) as Promise<unknown>) as Record<string, any>);
   }
   /** Ajusta o valor do próximo ciclo (a fatura do mês) e/ou pausa, reativa ou cancela. */
   async updatePreapproval(id: string, p: { amountCents?: number; status?: 'authorized' | 'paused' | 'cancelled' }): Promise<MpPreapproval> {
-    return preapproval(await this.call<Record<string, any>>('PUT', `/preapproval/${encodeURIComponent(id)}`, {
+    return preapproval(await this.sdk(`/preapproval/${id}`, () => new MpPreApprovalClient(this.sdkConfig(this.platformToken)).update({ id, body: {
       ...(p.amountCents ? { auto_recurring: { transaction_amount: p.amountCents / 100, currency_id: 'BRL' } } : {}), ...(p.status ? { status: p.status } : {}),
-    }, this.platformToken));
+    } as never }) as Promise<unknown>) as Record<string, any>);
   }
   /** Cobranças feitas por uma assinatura (cada uma aponta para um pagamento, que é conferido à parte). */
   async authorizedPayments(preapprovalId: string): Promise<{ id: string; paymentId: string | null; status: string; amountCents: number }[]> {
@@ -403,7 +408,7 @@ export class MercadoPagoClient {
         ...(p.type ? { payment_method: { default_type: p.type, ...(credit && (p.installments ?? 1) > 1 ? { default_installments: p.installments, installments_cost: 'seller' } : {}) } } : {}),
       },
     };
-    return mpOrder(await this.call<Record<string, any>>('POST', '/v1/orders', body, p.accessToken, p.idem));
+    return mpOrder(await this.orderCreate(body, p.accessToken, p.idem));
   }
 
   /** Pix com QR dinâmico na conta do lojista: o Mercado Pago avisa quando cai. */
@@ -414,17 +419,17 @@ export class MercadoPagoClient {
       transactions: { payments: [{ amount: (p.amountCents / 100).toFixed(2), payment_method: { id: 'pix', type: 'bank_transfer' }, expiration_time: `PT${Math.max(30, p.expiresMin ?? 30)}M` }] },
     };
     try {
-      return mpOrder(await this.call<Record<string, any>>('POST', '/v1/orders', { ...body, config: this.onlineConfig(p.statementDescriptor) }, p.accessToken, p.idem));
+      return mpOrder(await this.orderCreate({ ...body, config: this.onlineConfig(p.statementDescriptor) }, p.accessToken, p.idem));
     } catch (e) {
       // Se o Mercado Pago recusar algum campo de qualidade (ex.: 3DS num Pix), o Pix do caixa não pode parar: manda sem eles.
       if (!(e instanceof BadGatewayException) || !/\((400|422)\)/.test(e.message)) throw e;
       this.logger.warn(`Ordem Pix recusada com config de qualidade; tentando sem: ${(e as Error).message}`);
-      return mpOrder(await this.call<Record<string, any>>('POST', '/v1/orders', body, p.accessToken, `${p.idem}-b`));
+      return mpOrder(await this.orderCreate(body, p.accessToken, `${p.idem}-b`));
     }
   }
 
   async order(accessToken: string, id: string): Promise<MpOrder> {
-    return mpOrder(await this.call<Record<string, any>>('GET', `/v1/orders/${encodeURIComponent(id)}`, undefined, accessToken));
+    return mpOrder(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>) as Record<string, any>);
   }
 
   /** Cancela a cobrança. Já na maquininha (at_terminal) o cancelamento é pedido e confirmado depois. */

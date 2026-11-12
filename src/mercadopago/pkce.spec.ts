@@ -21,13 +21,13 @@ describe('OAuth do Mercado Pago com PKCE', () => {
   });
 
   it('link leva code_challenge e S256; a troca do código leva o code_verifier', async () => {
-    const mp = new MercadoPagoClient(new ConfigService({ MP_CLIENT_ID: '8864762014862583', MP_CLIENT_SECRET: 's', MP_REDIRECT_URI: 'https://usebalcao.com/app/loja/mercadopago' }));
+    const mp = new MercadoPagoClient(new ConfigService({ MP_CLIENT_ID: '8864762014862583', MP_CLIENT_SECRET: 's', MP_REDIRECT_URI: 'https://usebalcao.com/app/loja/mercadopago', MP_ACCESS_TOKEN: 'APP_USR-plataforma' })); // a troca pelo SDK usa a credencial da plataforma (obrigatória em produção)
     const u = new URL(mp.authUrl('st', 'CHAL'));
     expect(u.searchParams.get('code_challenge')).toBe('CHAL');
     expect(u.searchParams.get('code_challenge_method')).toBe('S256');
     expect(u.searchParams.get('redirect_uri')).toBe('https://usebalcao.com/app/loja/mercadopago');
     let body: any;
-    global.fetch = jest.fn(async (_u: string, init: any) => { body = JSON.parse(init.body); return { ok: true, status: 200, json: async () => ({ access_token: 'A', refresh_token: 'R', user_id: 1 }) } as any; }) as any;
+    global.fetch = jest.fn(async (_u: string, init: any) => { body = JSON.parse(init.body); return new Response(JSON.stringify({ access_token: 'A', refresh_token: 'R', user_id: 1 }), { status: 200, headers: { 'content-type': 'application/json' } }); }) as any;
     await mp.exchangeCode('CODE', 'VERIF');
     expect(body).toMatchObject({ grant_type: 'authorization_code', code: 'CODE', code_verifier: 'VERIF' });
   });
