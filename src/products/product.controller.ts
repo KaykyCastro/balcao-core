@@ -41,6 +41,12 @@ export class ProductController {
   }
 
   /** Produtos com estoque baixo (só os que controlam estoque). `?threshold=5` */
+  /** Opções já cadastradas nos produtos da loja (para reaproveitar num produto novo sem digitar de novo). */
+  @Get('option-groups')
+  optionGroups(@CurrentEnterprise() enterpriseId: string) {
+    return this.productService.optionLibrary(enterpriseId);
+  }
+
   @Get('low-stock')
   lowStock(@CurrentEnterprise() eid: string, @Query() q: LowStockQueryDto) {
     return this.productService.lowStock(eid, q.threshold);

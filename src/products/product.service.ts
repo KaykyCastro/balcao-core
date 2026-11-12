@@ -1,5 +1,5 @@
 import { StorageService } from '../storage/storage.service';
-import { OptionsError, sanitizeOptions } from './options.rules';
+import { OptionsError, sanitizeOptions, type OptionGroup } from './options.rules';
 import { removedUrls } from '../storage/storage.rules';
 import { ConflictException, Injectable, NotFoundException, UnprocessableEntityException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -255,6 +255,23 @@ export class ProductService {
   async sitemapEntries(enterpriseId: string, max = 5000): Promise<{ id: string; updatedAt: Date | null }[]> {
     const rows = await this.productModel.find({ enterpriseId: new Types.ObjectId(enterpriseId), showOnline: { $ne: false } }).select('_id updatedAt').sort({ updatedAt: -1 }).limit(max).lean();
     return rows.map((r) => ({ id: String(r._id), updatedAt: (r as unknown as { updatedAt?: Date }).updatedAt ?? null }));
+  }
+
+  /**
+   * Biblioteca de opções da loja: os grupos de opções que já existem nos produtos, sem repetir (mesmo nome e mesmas
+   * escolhas = um só), com quantos produtos usam. Serve para o lojista reaproveitar "Cor", "Tecido"… num produto novo.
+   */
+  async optionLibrary(enterpriseId: string) {
+    const rows = await this.productModel.find({ enterpriseId: new Types.ObjectId(enterpriseId), 'options.0': { $exists: true } }).select('name options').sort({ updatedAt: -1 }).limit(300).lean();
+    const seen = new Map<string, { group: OptionGroup; products: number; example: string }>();
+    for (const r of rows) {
+      for (const g of (r.options ?? []) as OptionGroup[]) {
+        const key = `${g.name.trim().toLowerCase()}|${g.items.map((i) => `${i.name.trim().toLowerCase()}:${i.priceCents}`).join(',')}|${g.min}|${g.max}|${g.repeat}|${g.pricing}`;
+        const cur = seen.get(key);
+        if (cur) cur.products++; else seen.set(key, { group: g, products: 1, example: r.name });
+      }
+    }
+    return { items: [...seen.values()].sort((a, b) => b.products - a.products).slice(0, 60) };
   }
 
   async publicGet(enterpriseId: string, id: string) {

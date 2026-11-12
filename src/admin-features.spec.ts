@@ -12,7 +12,7 @@ describe('SettingsService', () => {
     return { svc: new SettingsService(model), model };
   };
   it('sem documento: padrão R$ 40 e 30 dias', async () => {
-    expect(await mk(null).svc.policy()).toEqual({ capCents: 4000, trialDays: 30, onlineRateBps: 150, directoryRateBps: 300 });
+    expect(await mk(null).svc.policy()).toEqual({ capCents: 4000, trialDays: 30, onlineRateBps: 50, directoryRateBps: 100 });
   });
   it('trialDays 0 é respeitado (não vira o padrão)', async () => {
     expect(await mk({ capCents: 0, trialDays: 0 }).svc.policy()).toMatchObject({ capCents: 0, trialDays: 0 });

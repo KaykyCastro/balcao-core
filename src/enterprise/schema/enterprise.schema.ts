@@ -92,7 +92,7 @@ export class EnterpriseSchema {
 
   /** Cores do painel (cor principal e dos gráficos), as mesmas em todo computador e para os colaboradores. null = laranja do Balcão. */
   @Prop({ type: Object, default: null })
-  panelTheme?: { accent: string; chart: string } | null;
+  panelTheme?: { accent: string; chart: string; bg?: string; nav?: string; logo?: 'balcao' | 'empresa'; logoColor?: string } | null;
 
   /** Taxa do ERP em aberto, em centavos. */
   @Prop({ required: true, default: 0, min: 0 })

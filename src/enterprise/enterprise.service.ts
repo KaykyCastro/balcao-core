@@ -1,5 +1,5 @@
 import { StorageService } from '../storage/storage.service';
-import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
@@ -19,6 +19,12 @@ export const BCRYPT_COST = 12;
 export const DUMMY_HASH = bcrypt.hashSync('senha-que-nunca-sera-usada', BCRYPT_COST);
 
 /** Coleções com dados da empresa apagadas junto com a conta. Faturas e razão de taxas ficam (registro financeiro). */
+
+/** Luminância relativa (0 = preto, 1 = branco) de uma cor #rrggbb. */
+function relLum(hex: string) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
 
 @Injectable()
 export class EnterpriseService {
@@ -91,7 +97,12 @@ export class EnterpriseService {
     if (dto.logo !== undefined) set.logo = await this.storage.resolve(id, 'logo', dto.logo);
     if (dto.cnpj !== undefined) set.cnpj = dto.cnpj;
     if (dto.staffMaxDiscountBps !== undefined) set.staffMaxDiscountBps = dto.staffMaxDiscountBps;
-    if (dto.panelTheme !== undefined) set.panelTheme = dto.panelTheme ? { accent: dto.panelTheme.accent, chart: dto.panelTheme.chart } : null;
+    if (dto.panelTheme !== undefined) {
+      const t = dto.panelTheme;
+      // Fundo escuro deixaria o texto do painel (escuro) ilegível: só tons claros.
+      if (t?.bg && relLum(t.bg) < 0.6) throw new BadRequestException({ statusCode: 400, code: 'PANEL_BG_DARK', message: 'Escolha um fundo claro: o texto do painel é escuro e ficaria difícil de ler.' });
+      set.panelTheme = t ? { accent: t.accent, chart: t.chart, ...(t.bg ? { bg: t.bg } : {}), ...(t.nav ? { nav: t.nav } : {}), ...(t.logo ? { logo: t.logo } : {}), ...(t.logoColor ? { logoColor: t.logoColor } : {}) } : null;
+    }
     if (changesEmail) set.email = newEmail;
     const update: Record<string, unknown> = { $set: set };
     if (dto.password !== undefined) {

@@ -56,7 +56,7 @@ export class UpdateSettingsDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(TRIAL_MAX_DAYS)
   trialDays?: number;
 
-  /** Loja online, venda pelo link da própria loja (bps: 150 = 1,5%). */
+  /** Loja online, venda pelo link da própria loja (bps: 50 = 0,5%). */
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(ONLINE_RATE_MAX_BPS)
   onlineRateBps?: number;
 

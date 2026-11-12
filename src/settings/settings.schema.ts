@@ -14,7 +14,7 @@ export class PlatformSettings {
   @Prop({ min: 0 })
   trialDays?: number;
 
-  /** Taxa da loja online quando o cliente vem pelo link da própria loja (basis points: 150 = 1,5%). */
+  /** Taxa da loja online quando o cliente vem pelo link da própria loja (basis points: 50 = 0,5%). */
   @Prop({ min: 0 })
   onlineRateBps?: number;
 

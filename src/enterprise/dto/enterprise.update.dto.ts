@@ -1,11 +1,18 @@
 import { Transform, Type } from 'class-transformer';
-import { IsEmail, IsInt, ValidateNested, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsEmail, IsIn, IsInt, ValidateNested, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { LOGO_RE, PASSWORD_MSG } from './enterprise-create.dto';
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 export class PanelThemeDto {
   @Matches(HEX, { message: 'Cor inválida' }) accent!: string;
   @Matches(HEX, { message: 'Cor inválida' }) chart!: string;
+  /** Fundo do sistema (atrás de tudo no painel). Só tons claros: o texto do painel é escuro. Ausente = padrão. */
+  @IsOptional() @Matches(HEX, { message: 'Cor inválida' }) bg?: string;
+  /** Fundo da barra de navegação. O texto da barra fica preto ou branco sozinho. Ausente = branco. */
+  @IsOptional() @Matches(HEX, { message: 'Cor inválida' }) nav?: string;
+  /** Logo da barra: a marca do Balcão (na cor `logoColor`) ou a logo da empresa. */
+  @IsOptional() @IsIn(['balcao', 'empresa']) logo?: 'balcao' | 'empresa';
+  @IsOptional() @Matches(HEX, { message: 'Cor inválida' }) logoColor?: string;
 }
 
 export class EnterpriseUpdateDto {
