@@ -1,3 +1,4 @@
+import { CASH_MAX_CENTS } from '../../common/money';
 import { Type } from 'class-transformer';
 import { OptionChoiceDto } from './order.dto';
 import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsInt, IsMongoId, IsOptional, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
@@ -48,7 +49,7 @@ export class TabByDto {
 }
 export class TabSettleDto extends TabByDto {
   @IsIn(['cash', 'pix', 'card', 'other']) method: 'cash' | 'pix' | 'card' | 'other';
-  @IsOptional() @IsInt() @Min(0) @Max(100_000_000) cashReceivedCents?: number;
+  @IsOptional() @IsInt() @Min(0) @Max(CASH_MAX_CENTS, { message: 'O valor recebido pode ser de no máximo R$ 100.000.000,00' }) cashReceivedCents?: number;
 }
 export class TabServiceDto {
   @IsBoolean() on: boolean;

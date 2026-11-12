@@ -1,3 +1,4 @@
+import { CASH_MAX_CENTS } from '../../common/money';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize, ArrayNotEmpty, IsArray, IsBoolean, IsEmail, IsIn, IsInt, IsMongoId, IsOptional, IsString, Length, Matches, Max, MaxLength, Min, MinLength, ValidateNested,
@@ -48,7 +49,7 @@ export class PayOnDeliveryChoiceDto {
 }
 export class CollectDto {
   @IsIn(['cash', 'card', 'pix', 'other']) method: 'cash' | 'card' | 'pix' | 'other';
-  @IsOptional() @IsInt() @Min(0) @Max(100_000_000) cashReceivedCents?: number;
+  @IsOptional() @IsInt() @Min(0) @Max(CASH_MAX_CENTS, { message: 'O valor recebido pode ser de no máximo R$ 100.000.000,00' }) cashReceivedCents?: number;
 }
 
 export class CheckoutDto {
