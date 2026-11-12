@@ -26,6 +26,7 @@ const LAYOUT: Record<string, (v: unknown) => unknown> = {
   subtitle: text(40),
   popularLimit: int(1, 48),
   accent: (v) => (v === null ? null : hex(v)),
+  pageBg: (v) => (v === null ? null : hex(v)),
   cartSide: oneOf(['right', 'left']),
   density: oneOf(['comfortable', 'compact']),
   textSize: oneOf(['sm', 'md', 'lg']),

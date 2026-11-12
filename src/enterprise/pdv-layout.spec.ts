@@ -15,6 +15,12 @@ describe('sanitizePdvLayout (layout da tela de vendas compartilhado)', () => {
     expect(sanitizePdvLayout({ receipt: { cols: 42, encoding: 'latin1', copies: 2, cut: false, feed: 4, autoPrint: true } })).toEqual({ receipt: {} });
   });
 
+  it('fundo atrás da tela de vendas: cor válida, null (igual ao painel) ou descartado', () => {
+    expect(sanitizePdvLayout({ pageBg: '#FFF1EA' })).toEqual({ pageBg: '#FFF1EA' });
+    expect(sanitizePdvLayout({ pageBg: null })).toEqual({ pageBg: null });
+    expect(sanitizePdvLayout({ pageBg: 'url(x)' })).toEqual({});
+  });
+
   it('accent null volta para a cor do painel', () => {
     expect(sanitizePdvLayout({ accent: null })).toEqual({ accent: null });
   });
