@@ -1,4 +1,5 @@
 import { Controller, Get, NotFoundException, Param, Res } from '@nestjs/common';
+import { storeUrl } from './domain.rules';
 import { ConfigService } from '@nestjs/config';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
@@ -49,7 +50,7 @@ export class SeoController {
   @Get('store/:slug/sitemap.xml')
   async store(@Param('slug') slug: string, @Res() res: Response) {
     const { store } = await this.stores.publicBySlug(slug);
-    const base = `${this.front}/loja/${store.slug}`;
+    const base = `${storeUrl(this.front, store)}`;
     const items = await this.products.sitemapEntries(String(store.enterpriseId));
     const urls = [urlTag(base, day((store as unknown as { updatedAt?: Date }).updatedAt), '1.0'), urlTag(`${base}/politicas`, undefined, '0.2'), ...items.map((p) => urlTag(`${base}/p/${p.id}`, day(p.updatedAt), '0.8'))];
     this.xml(res, `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.join('')}</urlset>`);
@@ -66,7 +67,7 @@ export class SeoController {
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(JSON.stringify({
       name: title.slice(0, 70), short_name: store.name.slice(0, 24), description: (store.seo?.description || store.tagline || '').slice(0, 160),
-      start_url: `${this.front}/loja/${store.slug}`, scope: `${this.front}/loja/${store.slug}`, display: 'standalone', lang: 'pt-BR',
+      start_url: `${storeUrl(this.front, store)}`, scope: `${storeUrl(this.front, store)}`, display: 'standalone', lang: 'pt-BR',
       theme_color: store.theme?.accent ?? '#FF3D00', background_color: store.theme?.background === 'custom' ? store.theme.bgColor : dark ? '#111111' : '#ffffff',
       icons: hasIcon ? [{ src: `${this.api}/public/store/${store.slug}/icon`, sizes: 'any', purpose: 'any' }] : [],
     }));

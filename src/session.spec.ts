@@ -87,6 +87,9 @@ describe('CsrfGuard', () => {
     expect(() => g.canActivate(ctx(req({ ...h, origin: 'https://evil.com' })))).toThrow(ForbiddenException);
     expect(g.canActivate(ctx(req({ ...h, origin: 'https://app.x.com' })))).toBe(true);
     expect(g.canActivate(ctx(req({ ...h, origin: 'https://b.x.com' })))).toBe(true);
+    // Loja no domínio próprio: /api no mesmo domínio (Host = origem) passa; outro site tentando o mesmo endereço, não.
+    expect(g.canActivate(ctx(req({ ...h, origin: 'https://minhaloja.com.br', host: 'minhaloja.com.br' })))).toBe(true);
+    expect(() => g.canActivate(ctx(req({ ...h, origin: 'https://evil.com', host: 'minhaloja.com.br' })))).toThrow(ForbiddenException);
   });
   it('sem CORS_ORIGIN (dev) não confere a origem, mas o cabeçalho continua exigido', () => {
     const dev = new CsrfGuard(cfg());

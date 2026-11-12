@@ -1,4 +1,5 @@
 import { phoneIndex } from '../common/security/field-crypto';
+import { storeUrl } from './domain.rules';
 import { lineName, OptionsError, priceChoice } from '../products/options.rules';
 import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
@@ -222,7 +223,7 @@ export class OrderService {
     if (shopper) await this.shoppers.rememberCheckout(shopper, dto.customer, !noAddress ? dto.address ?? null : null).catch(() => undefined);
 
     if (cod) {
-      const link = `${this.front}/loja/${store.slug}/pedido/${String(order._id)}?t=${token}`;
+      const link = `${storeUrl(this.front, store)}/pedido/${String(order._id)}?t=${token}`;
       await this.orders.updateOne({ _id: order._id }, { $set: { linkSealed: seal(link) } });
       void this.notifyCod(order, store.name, link);
       return { orderId: String(order._id), number: order.number, token, checkoutUrl: null, totalCents: order.totalCents };
@@ -243,10 +244,10 @@ export class OrderService {
           ],
         payer: { name: order.customer.name, email: order.customer.email, phone: order.customer.phone, document: order.customer.document, address: order.address, registeredAt: await this.customerSince(order) },
         maxInstallments: store.theme?.installments ?? 0,
-        backUrl: `${this.front}/loja/${store.slug}/pedido/${oid}?t=${token}`,
+        backUrl: `${storeUrl(this.front, store)}/pedido/${oid}?t=${token}`,
         notificationUrl: this.api.startsWith('https://') ? `${this.api}/public/store-webhook/mercadopago?o=${oid}&s=${sign(SCOPE, oid)}` : undefined,
       });
-      const link = `${this.front}/loja/${store.slug}/pedido/${oid}?t=${token}`;
+      const link = `${storeUrl(this.front, store)}/pedido/${oid}?t=${token}`;
       await this.orders.updateOne({ _id: order._id }, { $set: { 'payment.checkoutUrl': pref.initPoint, 'payment.preferenceId': pref.id, linkSealed: seal(link) } });
       void this.mail.send(order.customer.email, `Pedido #${order.number} recebido - ${store.name}`,
         `Olá, ${order.customer.name.split(' ')[0]}! Seu pedido #${order.number} na ${store.name} foi criado.\n\n${order.items.map((i) => `- ${i.quantity}x ${lineName(i.productName, i.options, i.note)} (${fmt(i.totalCents)})`).join('\n')}\nTotal: ${fmt(order.totalCents)}\n\nSe ainda não pagou, pague por aqui (vale por 1 hora): ${pref.initPoint}\nAcompanhe o pedido: ${link}\n\nGuarde este e-mail: o link acima é o acesso ao seu pedido, sem precisar de cadastro.`).catch(() => undefined);

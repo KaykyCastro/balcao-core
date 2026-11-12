@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
+import { storeUrl } from './domain.rules';
 import { OptionsError, priceChoice, type OptionGroup, type PickedOption } from '../products/options.rules';
 import { MP_PAYMENT_ID_RE } from '../mercadopago/mercadopago.client';
 import { ConfigService } from '@nestjs/config';
@@ -326,7 +327,7 @@ export class TabService {
         ...(tab.serviceCents > 0 ? [{ title: 'Taxa de serviço', quantity: 1, unitCents: tab.serviceCents }] : []),
       ],
       payer: { name: tab.name },
-      backUrl: `${this.front}/loja/${store.slug}/comanda/${oid}?t=${encodeURIComponent(t)}`,
+      backUrl: `${storeUrl(this.front, store)}/comanda/${oid}?t=${encodeURIComponent(t)}`,
       notificationUrl: this.api.startsWith('https://') ? `${this.api}/public/tab-webhook/mercadopago?tab=${oid}&s=${sign(SCOPE, oid)}` : undefined,
       expiresAt: new Date(Date.now() + 60 * 60_000),
     });

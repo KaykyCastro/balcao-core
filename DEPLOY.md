@@ -65,6 +65,41 @@ seudominio.com.br {
 ```
 `sudo systemctl reload caddy`. O Caddy emite e renova o certificado sozinho. Com o Caddy na frente, use `TRUST_PROXY=1`.
 
+### Domínio próprio das lojas (minhaloja.com.br)
+O lojista liga em **Loja online → Sua loja → Domínio próprio**. O Caddy emite o HTTPS de cada domínio na primeira visita,
+mas só se a API disser que o domínio é de uma loja ativa (`/public/domains/allow`). No **começo** do `/etc/caddy/Caddyfile`:
+```
+{
+  on_demand_tls {
+    ask http://127.0.0.1:2700/public/domains/allow
+  }
+}
+```
+E, **depois** dos blocos acima, um bloco para "qualquer outro domínio" (as lojas):
+```
+https:// {
+  tls {
+    on_demand
+  }
+  handle_path /api/* {
+    reverse_proxy 127.0.0.1:2700
+  }
+  handle {
+    root * /var/www/balcao
+    encode gzip
+    try_files {path} /index.html
+    file_server
+  }
+}
+```
+- `root` é a mesma pasta do site (o `dist` do balcao-web). O site percebe que está num domínio de loja e mostra só ela.
+- `/api` no domínio da loja vai para a API (o cookie do comprador fica no domínio da loja; o CSRF aceita a mesma origem).
+- No `.env` da API: `DOMAIN_TARGET_IPS=<IP público da VPS>` (o registro A que o lojista cria) e, opcional,
+  `DOMAIN_TARGET_HOST=lojas.seudominio.com.br` (crie esse nome no seu DNS apontando para a VPS; vira o CNAME do www).
+- No `.env` do site, `VITE_SITE_URL` precisa estar preenchido: é como o site sabe qual é o endereço da plataforma.
+- Depois de mudar o Caddyfile: `sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy`.
+
+
 ## 7. Serviços externos (depois que os domínios responderem em HTTPS)
 - **Mercado Pago:** na aplicação, Redirect URL `https://seudominio.com.br/app/loja/mercadopago` e Webhook
   `https://api.seudominio.com.br/billing/webhook/mercadopago/assinatura` (eventos de assinaturas).

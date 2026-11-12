@@ -1,4 +1,5 @@
 import { CodeService } from './code/code.service';
+import { DomainService } from './domain.service';
 import { MessagesModule } from '../messages/messages.module';
 import { MpOrdersWebhookService } from './mp-orders-webhook.service';
 import { Module } from '@nestjs/common';
@@ -63,7 +64,7 @@ import { StaffModule } from '../staff/staff.module';
     MessagesModule, EnterprisesModule, ProductModule, CategorysModule, PromotionModule, SaleModule, BillingModule, MailModule, SettingsModule, MercadoPagoModule, CustomerModule, ShopperModule, StaffModule,
   ],
   controllers: [StoreConfigController, MediaController, OrderController, SeoController, MarketplaceController, MarketBannerController, CouponController, PublicReviewController, MerchantReviewController, StorefrontController, ShopperAccountController, TabController, TabPublicController],
-  providers: [MpOrdersWebhookService, CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
+  providers: [DomainService, MpOrdersWebhookService, CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
   exports: [StoreService, OrderService, ProtectionService, TabService, MarketBannerService],
 })
 export class StoreModule {}

@@ -26,6 +26,13 @@ export class Store {
   @Prop({ default: false })
   ordersPaused: boolean;
 
+  /**
+   * Domínio próprio (ex.: minhaloja.com.br): a loja abre nele, sem o endereço da plataforma. `pending` até o DNS
+   * apontar para o Balcão e o TXT de confirmação estar certo (store/domain.service.ts); só `active` abre a loja.
+   */
+  @Prop(raw({ host: { type: String, default: null, lowercase: true, trim: true }, status: { type: String, enum: ['pending', 'active'], default: 'pending' }, verifiedAt: { type: Date, default: null }, checkedAt: { type: Date, default: null }, error: { type: String, default: '' } }))
+  domain: { host: string | null; status: 'pending' | 'active'; verifiedAt: Date | null; checkedAt: Date | null; error: string } | null;
+
   /** Endereço da loja: balcao.app/loja/<slug> */
   @Prop({ required: true, unique: true, lowercase: true, trim: true, maxlength: 40 })
   slug: string;
@@ -216,3 +223,5 @@ export class Store {
 
 export const StoreSchemaFactory = SchemaFactory.createForClass(Store);
 StoreSchemaFactory.index({ enabled: 1, listed: 1, segment: 1 });
+// Um domínio ativo pertence a uma loja só.
+StoreSchemaFactory.index({ 'domain.host': 1 }, { unique: true, partialFilterExpression: { 'domain.status': 'active' } });

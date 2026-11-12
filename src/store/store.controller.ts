@@ -1,8 +1,9 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Put, Query, Delete } from '@nestjs/common';
+import { DomainService } from './domain.service';
 import { Throttle } from '@nestjs/throttler';
 import { StoreService } from './store.service';
 import { OrderService } from './order.service';
-import { MpCallbackDto, SlugQueryDto, StoreUpdateDto, TestQuoteDto, VisibilityDto, StorePageDto } from './dto/store.dto';
+import { MpCallbackDto, SlugQueryDto, StoreUpdateDto, TestQuoteDto, VisibilityDto, StorePageDto, StoreDomainDto } from './dto/store.dto';
 import { CollectDto, LabelDto, LabelsPrintDto, OrderCancelDto, OrderListQueryDto, OrderStatusDto, ReplyDto, PrintQueueDto } from './dto/order.dto';
 import { LogisticsService } from './logistics.service';
 import { ProtectionService } from './protection.service';
@@ -16,7 +17,7 @@ import { CodeCompileDto } from './dto/store.dto';
 /** Painel do lojista: configuração da loja online. */
 @Controller('store-config')
 export class StoreConfigController {
-  constructor(private readonly stores: StoreService, private readonly products: ProductService, private readonly code: CodeService) {}
+  constructor(private readonly stores: StoreService, private readonly products: ProductService, private readonly code: CodeService, private readonly domains: DomainService) {}
 
   @Get()
   get(@CurrentEnterprise() eid: string) {
@@ -24,6 +25,21 @@ export class StoreConfigController {
   }
 
   /** Taxas da loja online (para o botão "preço com a taxa" do cadastro de produto; liberado a quem cuida do estoque). */
+  /** Domínio próprio: situação e os registros de DNS a criar. */
+  @Get('domain')
+  domain(@CurrentEnterprise() eid: string) { return this.domains.info(eid); }
+
+  @Put('domain')
+  setDomain(@CurrentEnterprise() eid: string, @Body() dto: StoreDomainDto) { return this.domains.set(eid, dto.host); }
+
+  /** Confere o DNS agora (aponta para o Balcão + código de confirmação). */
+  @Post('domain/verify')
+  @HttpCode(200)
+  verifyDomain(@CurrentEnterprise() eid: string) { return this.domains.verify(eid); }
+
+  @Delete('domain')
+  removeDomain(@CurrentEnterprise() eid: string) { return this.domains.remove(eid); }
+
   @Get('fees')
   fees(@CurrentEnterprise() eid: string) {
     return this.stores.fees(eid);

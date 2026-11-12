@@ -231,3 +231,8 @@ export class StorePageDto {
 export class CodeCompileDto {
   @IsString() @MaxLength(20_000) code: string;
 }
+
+/** Domínio próprio da loja (ex.: minhaloja.com.br). Validado e normalizado no DomainService. */
+export class StoreDomainDto {
+  @IsString() @MaxLength(253) host: string;
+}

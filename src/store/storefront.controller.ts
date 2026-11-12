@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, HttpCode, NotFoundException, Param, Post, Query, Req, Res } from '@nestjs/common';
+import { DomainService } from './domain.service';
 import { MpOrdersWebhookService } from './mp-orders-webhook.service';
 import type { Request, Response } from 'express';
 import { ShopperService } from '../shopper/shopper.service';
@@ -60,7 +61,23 @@ export class StorefrontController {
     private readonly rewards: RewardsService,
     private readonly protection: ProtectionService,
     private readonly ordersHook: MpOrdersWebhookService,
+    private readonly domainsSvc: DomainService,
   ) {}
+
+  /** Vitrine aberta num domínio próprio: qual loja é (o site chama ao abrir num endereço que não é o da plataforma). */
+  @Get('store-by-host')
+  storeByHost(@Query('host') host?: string) { return this.domainsSvc.byHost(String(host ?? '').slice(0, 253)); }
+
+  /**
+   * O Caddy pergunta antes de emitir o certificado HTTPS de um domínio (on_demand_tls ask): 200 = pode, 404 = não.
+   * Só domínios ativos de alguma loja; sem isso, qualquer um apontaria um domínio e gastaria os certificados.
+   */
+  @SkipThrottle()
+  @Get('domains/allow')
+  async domainAllow(@Query('domain') domain?: string) {
+    if (!(await this.domainsSvc.allow(String(domain ?? '').slice(0, 253)))) throw new NotFoundException('Domínio não liberado');
+    return { ok: true };
+  }
 
   /** Página "Lojas no Balcão". */
   @Get('stores')
