@@ -45,6 +45,12 @@ export class StorageService {
 
   url(key: string) { return `${this.driver.publicBase}/${key}`; }
   keyOf(url: string) { return keyFromUrl(this.driver.publicBase, url); }
+  /** Lê um arquivo nosso pela URL pública (null se a URL não for do nosso armazenamento ou o arquivo sumiu). */
+  async readOwn(url: string): Promise<Buffer | null> {
+    const key = this.keyOf(url);
+    if (!key) return null;
+    try { return await this.driver.read(key); } catch { return null; }
+  }
   /** URL nossa (do R2/pasta local), e não um link externo. */
   isOurs(url: string | null | undefined) { return !!url && !!this.keyOf(url); }
 

@@ -17,6 +17,7 @@ import { StoreScheduler } from './store.scheduler';
 import { OrderController, StoreConfigController } from './store.controller';
 import { StorefrontController } from './storefront.controller';
 import { SeoController } from './seo.controller';
+import { ShareController } from './share.controller';
 import { MarketplaceController } from './marketplace.controller';
 import { MarketplaceService } from './marketplace.service';
 import { ProductEvent, ProductEventSchema } from './schema/product-event.schema';
@@ -63,7 +64,7 @@ import { StaffModule } from '../staff/staff.module';
     ]),
     MessagesModule, EnterprisesModule, ProductModule, CategorysModule, PromotionModule, SaleModule, BillingModule, MailModule, SettingsModule, MercadoPagoModule, CustomerModule, ShopperModule, StaffModule,
   ],
-  controllers: [StoreConfigController, MediaController, OrderController, SeoController, MarketplaceController, MarketBannerController, CouponController, PublicReviewController, MerchantReviewController, StorefrontController, ShopperAccountController, TabController, TabPublicController],
+  controllers: [StoreConfigController, MediaController, OrderController, SeoController, ShareController, MarketplaceController, MarketBannerController, CouponController, PublicReviewController, MerchantReviewController, StorefrontController, ShopperAccountController, TabController, TabPublicController],
   providers: [DomainService, MpOrdersWebhookService, CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
   exports: [StoreService, OrderService, ProtectionService, TabService, MarketBannerService],
 })

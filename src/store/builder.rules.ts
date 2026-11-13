@@ -185,6 +185,24 @@ export const BLOCKS: Record<string, Record<string, F>> = {
   deliveryArea: { title: t(120), text: L(600), areas: list(30, { name: t(60) }) },
   whatsForm: { title: t(120), text: L(300), button: t(40), fields: list(5, { label: t(40), kind: e('text', 'long', 'phone') }) },
   waveDivider: { color: C, shape: e('wave', 'curve', 'zigzag', 'slant'), flip: B, height: e('sm', 'md', 'lg') },
+  // moda (FashionBlocks.tsx): coleções, looks e vitrines com campanha
+  collectionBento: { title: t(120), fromCategories: B, items: list(5, { image: IMG, title: t(60), link: LINK }), label: t(40), font: FONT },
+  categoryHover: { kicker: t(60), title: t(120), limit: n(3, 12), font: FONT },
+  editorialProducts: { image: IMG, kicker: t(60), title: t(120), text: L(400), source: SOURCE, categoryId: ID, ids: ids(8), limit: n(2, 8), button: t(40), link: LINK, side: e('left', 'right'), font: FONT },
+  productDetails: { productId: ID, kicker: t(60), details: list(6, { title: t(60), text: L(240) }), button: t(40), font: FONT },
+  lookSlider: { title: t(120), items: list(10, { image: IMG, title: t(80), text: t(120), link: LINK }), ratio: e('3:4', '4:5', '9:16'), font: FONT },
+  categoryHero: { categoryId: ID, image: IMG, kicker: t(60), title: t(120), text: L(300), limit: n(2, 8), button: t(40), font: FONT },
+  campaignGrid: { image: IMG, kicker: t(60), title: t(120), button: t(40), link: LINK, source: SOURCE, categoryId: ID, ids: ids(12), limit: n(4, 12), position: e('start', 'end'), textColor: e('light', 'dark'), font: FONT },
+  giantText: { text: t(40), sub: t(160), link: LINK, outline: B, align: e('start', 'center'), font: FONT },
+  // vitrines de campanha (CampaignBlocks.tsx)
+  splitPromo: { big: t(24), title: t(120), text: t(200), coupon: B, button: t(40), link: LINK, left: C, right: C, height: e('md', 'lg', 'xl'), font: FONT },
+  bestSellerRank: { title: t(120), limit: n(3, 12), columns: n(3, 6), font: FONT },
+  productPhotoSplit: { title: t(120), source: SOURCE, categoryId: ID, ids: ids(12), limit: n(3, 12), image: IMG, imageTitle: t(80), link: LINK, side: e('left', 'right'), font: FONT },
+  editorialDuo: { left: IMG, right: IMG, kicker: t(60), title: t(80), button: t(40), link: LINK, textOn: e('left', 'right'), textColor: e('light', 'dark'), height: e('lg', 'xl', 'screen'), font: FONT },
+  photoStrip: { images: list(8, { src: IMG, link: LINK, label: t(40) }), ratio: e('3:4', '1:1', '4:5'), gap: B },
+  shippingBanner: { image: IMG, kicker: t(40), title: t(80), text: t(160), button: t(40), link: LINK, auto: B, textColor: e('light', 'dark'), font: FONT },
+  heroMixed: { image: IMG, light: t(40), bold: t(40), sub: t(160), button: t(40), link: LINK, align: e('start', 'center', 'end'), height: e('lg', 'xl', 'screen'), overlay: n(0, 80), textColor: e('light', 'dark'), font: FONT },
+  buyCards: { title: t(120), source: SOURCE, categoryId: ID, ids: ids(12), limit: n(2, 12), columns: n(2, 4), button: t(30), descriptions: B },
 };
 export const BLOCK_TYPES = Object.keys(BLOCKS);
 

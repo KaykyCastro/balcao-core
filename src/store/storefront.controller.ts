@@ -20,10 +20,10 @@ import { toCents } from '../common/money';
 import { onlineEffectivePrice } from '../products/schema/product.schema';
 import { minExtraCents, type OptionGroup } from '../products/options.rules';
 
-type P = Awaited<ReturnType<ProductService['publicGet']>> & { promotion?: { priceCents: number; remaining: number | null; endsAt: Date | null; name: string } | null };
+export type P = Awaited<ReturnType<ProductService['publicGet']>> & { promotion?: { priceCents: number; remaining: number | null; endsAt: Date | null; name: string } | null };
 
 /** Produto como a vitrine vê: preço em centavos, promoção e disponibilidade (sem saldo exato, a menos que a loja mostre). */
-function card(p: P, showStock: boolean, store?: { slug: string; name: string; cashbackBps?: number }) {
+export function card(p: P, showStock: boolean, store?: { slug: string; name: string; cashbackBps?: number }) {
   const normal = toCents(onlineEffectivePrice(p)); // preço da loja online
   const promo = p.promotion && p.promotion.priceCents < normal ? p.promotion : null;
   const left = p.trackStock === false ? null : p.quantity;

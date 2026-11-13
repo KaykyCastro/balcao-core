@@ -4,8 +4,37 @@ const page = (blocks: unknown[], style: unknown = {}) => ({ sections: [{ id: 'se
 
 describe('construtor de sites (página por seções)', () => {
   it('tem um catálogo grande de componentes', () => {
-    expect(BLOCK_TYPES.length).toBe(124);
+    expect(BLOCK_TYPES.length).toBe(140);
     expect(BLOCK_TYPES).toEqual(expect.arrayContaining(['navbar', 'banner', 'productGrid', 'video', 'search', 'icon', 'footer', 'editorialHero', 'lookbook', 'luxeProducts', 'concierge']));
+  });
+
+  it('componentes de moda: guarda só os campos conhecidos e corta listas e textos', () => {
+    const p = sanitizePage(page([
+      { id: 'blk1', type: 'collectionBento', props: { title: 'Coleções', fromCategories: false, items: Array.from({ length: 9 }, () => ({ title: 'x'.repeat(90), link: '#novidades', evil: 1 })) } },
+      { id: 'blk2', type: 'giantText', props: { text: 'VERÃO', outline: true, align: 'meio', sub: 'Nova coleção' } },
+      { id: 'blk3', type: 'campaignGrid', props: { limit: 99, position: 'end', textColor: 'dark', source: 'new' } },
+    ]));
+    const [a, b, c] = p.sections[0].blocks;
+    expect((a.props.items as unknown[]).length).toBe(5);
+    expect(a.props.items).toEqual(expect.arrayContaining([expect.not.objectContaining({ evil: 1 })]));
+    expect((a.props.items as { title: string }[])[0].title.length).toBe(60);
+    expect(b.props).toEqual({ text: 'VERÃO', outline: true, sub: 'Nova coleção' });
+    expect(c.props).toMatchObject({ limit: 12, position: 'end', textColor: 'dark', source: 'new' });
+    expect(() => sanitizePage(page([{ id: 'blk1', type: 'lookSlider', props: { items: [{ title: 'Look', link: 'javascript:alert(1)' }] } }]))).toThrow(/Link inválido/);
+  });
+
+  it('vitrines de campanha: cores só em hexadecimal, números no limite, listas cortadas', () => {
+    const p = sanitizePage(page([
+      { id: 'blk1', type: 'splitPromo', props: { big: '11.11', left: '#FF4D2E', right: 'red', coupon: true, height: 'xl' } },
+      { id: 'blk2', type: 'bestSellerRank', props: { limit: 50, columns: 1 } },
+      { id: 'blk3', type: 'photoStrip', props: { images: Array.from({ length: 12 }, () => ({ src: '', label: 'Look' })), ratio: '3:4' } },
+      { id: 'blk4', type: 'heroMixed', props: { light: 'Esquenta', bold: 'Verão', overlay: 300, align: 'center' } },
+    ]));
+    const [a, b, c, d] = p.sections[0].blocks;
+    expect(a.props).toEqual({ big: '11.11', left: '#FF4D2E', coupon: true, height: 'xl' });
+    expect(b.props).toEqual({ limit: 12, columns: 3 });
+    expect((c.props.images as unknown[]).length).toBe(8);
+    expect(d.props).toMatchObject({ light: 'Esquenta', bold: 'Verão', overlay: 80, align: 'center' });
   });
 
   it('limpa campos desconhecidos, corta textos e normaliza números', () => {

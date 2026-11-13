@@ -57,12 +57,25 @@ api.seudominio.com.br {
   reverse_proxy 127.0.0.1:2700
 }
 seudominio.com.br {
-  root * /var/www/balcao
   encode gzip
-  try_files {path} /index.html
-  file_server
+  # Link mágico: quem monta a prévia do link (WhatsApp, Instagram/Facebook, X, LinkedIn, Telegram…) recebe a página
+  # com foto, nome e preço do produto (ou os dados da loja). Clientes e o Google recebem o site normal.
+  @previa {
+    path /loja/*
+    header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|twitterbot|linkedinbot|slackbot|telegrambot|discordbot|pinterest|skypeuripreview|redditbot|embedly|iframely|vkshare|snapchat|bitlybot|tumblr|mastodon|applebot)
+  }
+  handle @previa {
+    rewrite * /public/share?path={path}
+    reverse_proxy 127.0.0.1:2700
+  }
+  handle {
+    root * /var/www/balcao
+    try_files {path} /index.html
+    file_server
+  }
 }
 ```
+O site fica dentro de `handle { }` de propósito: solto, o `try_files` troca o caminho por `/index.html` antes do teste do link mágico.
 `sudo systemctl reload caddy`. O Caddy emite e renova o certificado sozinho. Com o Caddy na frente, use `TRUST_PROXY=1`.
 
 ### Domínio próprio das lojas (minhaloja.com.br)
@@ -84,6 +97,13 @@ https:// {
   handle_path /api/* {
     reverse_proxy 127.0.0.1:2700
   }
+  @previa {
+    header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|twitterbot|linkedinbot|slackbot|telegrambot|discordbot|pinterest|skypeuripreview|redditbot|embedly|iframely|vkshare|snapchat|bitlybot|tumblr|mastodon|applebot)
+  }
+  handle @previa {
+    rewrite * /public/share?host={host}&path={path}
+    reverse_proxy 127.0.0.1:2700
+  }
   handle {
     root * /var/www/balcao
     encode gzip
@@ -97,6 +117,7 @@ https:// {
 - No `.env` da API: `DOMAIN_TARGET_IPS=<IP público da VPS>` (o registro A que o lojista cria) e, opcional,
   `DOMAIN_TARGET_HOST=lojas.seudominio.com.br` (crie esse nome no seu DNS apontando para a VPS; vira o CNAME do www).
 - No `.env` do site, `VITE_SITE_URL` precisa estar preenchido: é como o site sabe qual é o endereço da plataforma.
+- Para conferir o link mágico: `curl -A WhatsApp/2 https://seudominio.com.br/loja/<slug>/p/<id>` deve trazer `og:title` com o nome e o preço.
 - Depois de mudar o Caddyfile: `sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy`.
 
 
