@@ -9,7 +9,8 @@
     "test": "jest",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "migrate:r2": "nest build && node scripts/migrate-r2.js",
-    "encrypt:pii": "nest build && node scripts/encrypt-pii.js"
+    "encrypt:pii": "nest build && node scripts/encrypt-pii.js",
+    "import:legado": "nest build && node scripts/import-legado.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1163.0",

@@ -1,6 +1,13 @@
 import { CASH_MAX_CENTS } from '../../common/money';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsIn, IsInt, IsMongoId, IsOptional, IsString, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsIn, IsInt, IsMongoId, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
+
+/** Opção escolhida (tamanho, cor, adicional): grupo, opção e quantas vezes. Mesmo formato da loja online. */
+export class SaleOptionDto {
+  @IsString() @Matches(/^[a-z0-9]{1,16}$/i) g: string;
+  @IsString() @Matches(/^[a-z0-9]{1,16}$/i) i: string;
+  @IsInt() @Min(1) @Max(20) q: number;
+}
 
 export class SaleItemInputDto {
   @IsMongoId()
@@ -8,6 +15,14 @@ export class SaleItemInputDto {
 
   @IsInt() @Min(1) @Max(100_000)
   quantity: number;
+
+  /** Opções do produto. O adicional é calculado pela API com as regras do produto (priceChoice). */
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => SaleOptionDto)
+  options?: SaleOptionDto[];
+
+  /** Observação da linha ("embrulhar para presente"). */
+  @IsOptional() @IsString() @MaxLength(140)
+  note?: string;
 }
 
 /** Desconto no carrinho: `percent` em pontos-base (1000 = 10%) ou `amount` em centavos. O valor final é calculado pela API. */

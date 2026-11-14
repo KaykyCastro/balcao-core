@@ -1,5 +1,5 @@
 import { cashChange } from './cash';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, QueryFilter, Model, Types } from 'mongoose';
 
@@ -14,6 +14,8 @@ import { PaginationQueryDto, Paginated } from '../common/dto/pagination-query.dt
 import { toCents } from '../common/money';
 import { isDuplicateKeyError } from '../common/mongo';
 import { promoUnits, promotionStatus } from '../promotion/promotion.rules';
+import { groupSaleLines, splitPromoUnits, type SaleLineIn } from './lines.rules';
+import { OptionsError, type OptionGroup } from '../products/options.rules';
 import { applySaleDiscount, DEFAULT_STAFF_MAX_DISCOUNT_BPS, type SaleDiscountInput } from './discount.rules';
 
 @Injectable()
@@ -38,18 +40,28 @@ export class SaleService {
     return typeof e?.staffMaxDiscountBps === 'number' ? e.staffMaxDiscountBps : DEFAULT_STAFF_MAX_DISCOUNT_BPS;
   }
 
-  async quote(enterpriseId: string, items: { productId: string; quantity: number }[], discount?: SaleDiscountInput | null, staff?: { id: string } | null): Promise<{ totalCents: number; subtotalCents: number; discountCents: number }> {
-    const quantities = new Map<string, number>();
-    for (const { productId, quantity } of items) quantities.set(productId, (quantities.get(productId) ?? 0) + quantity);
-    const promos = await this.promotionService.activeFor(enterpriseId, [...quantities.keys()]);
+  /** Confere as opções escolhidas e junta as linhas por produto (422 OPTIONS_INVALID se a escolha não vale). */
+  private lines(items: SaleLineIn[], products: Map<string, { name: string; options?: OptionGroup[] | null }>) {
+    try { return groupSaleLines(items, (id) => products.get(id)!); } catch (e) {
+      if (e instanceof OptionsError) throw new UnprocessableEntityException({ statusCode: 422, code: 'OPTIONS_INVALID', message: e.message });
+      throw e;
+    }
+  }
+
+  async quote(enterpriseId: string, items: SaleLineIn[], discount?: SaleDiscountInput | null, staff?: { id: string } | null): Promise<{ totalCents: number; subtotalCents: number; discountCents: number }> {
+    const ids = [...new Set(items.map((i) => i.productId))];
+    const products = new Map<string, Awaited<ReturnType<ProductService['getProductById']>>>();
+    for (const id of ids) products.set(id, await this.productService.getProductById(enterpriseId, id));
+    const grouped = this.lines(items, products as Map<string, { name: string; options?: OptionGroup[] | null }>);
+    const promos = await this.promotionService.activeFor(enterpriseId, ids);
     let totalCents = 0;
-    for (const [productId, quantity] of quantities) {
-      const p = await this.productService.getProductById(enterpriseId, productId);
+    for (const [productId, g] of grouped) {
+      const p = products.get(productId)!; const quantity = g.quantity;
       if (p.trackStock !== false && p.quantity < quantity) throw new ConflictException(`${p.name}: só há ${p.quantity} em estoque`);
       const normal = toCents(effectivePrice(p));
       const pr = promos.get(productId);
       const promoQty = pr && promotionStatus(pr) === 'active' && pr.promoPriceCents < normal ? Math.min(quantity, promoUnits(pr, quantity)) : 0;
-      totalCents += promoQty * (pr?.promoPriceCents ?? 0) + (quantity - promoQty) * normal;
+      for (const part of splitPromoUnits(g.lines, promoQty, pr?.promoPriceCents ?? 0, normal)) totalCents += part.unitCents * part.quantity;
     }
     const off = applySaleDiscount(totalCents, discount, await this.staffDiscountCap(enterpriseId, staff));
     return { subtotalCents: totalCents, discountCents: off, totalCents: totalCents - off };
@@ -78,14 +90,10 @@ export class SaleService {
     if (dto.customerId) await this.customerService.getCustomerById(enterpriseId, dto.customerId); // 404 se não for da empresa
     if (isFiado) await this.customerService.assertCanOwe(enterpriseId, dto.customerId!); // conta do marketplace só depois de pertencer à loja
 
-    // Junta linhas repetidas do mesmo produto.
-    const quantities = new Map<string, number>();
-    for (const { productId, quantity } of dto.items) {
-      quantities.set(productId, (quantities.get(productId) ?? 0) + quantity);
-    }
-
+    // Junta linhas repetidas do mesmo produto (e, dentro dele, a mesma escolha de opções + observação).
     const products = new Map<string, Awaited<ReturnType<ProductService['getProductById']>>>();
-    for (const productId of quantities.keys()) products.set(productId, await this.productService.getProductById(enterpriseId, productId));
+    for (const productId of new Set(dto.items.map((i) => i.productId))) products.set(productId, await this.productService.getProductById(enterpriseId, productId));
+    const grouped = this.lines(dto.items, products as Map<string, { name: string; options?: OptionGroup[] | null }>);
 
     const discountCap = dto.discount ? await this.staffDiscountCap(enterpriseId, staff) : null;
     const saleId = new Types.ObjectId();
@@ -97,8 +105,9 @@ export class SaleService {
         // então duas vendas ao mesmo tempo nunca passam do limite da promoção.
         const items: SaleItem[] = [];
         let totalCents = 0;
-        const promos = await this.promotionService.activeFor(enterpriseId, [...quantities.keys()], session);
-        for (const [productId, quantity] of quantities) {
+        const promos = await this.promotionService.activeFor(enterpriseId, [...grouped.keys()], session);
+        for (const [productId, g] of grouped) {
+          const quantity = g.quantity;
           const product = products.get(productId)!;
           const r = await this.productService.decreaseQuantity(enterpriseId, productId, quantity, session);
           const normalCents = toCents(effectivePrice(product));
@@ -107,14 +116,14 @@ export class SaleService {
           const promo = promos.get(productId);
           // Promoção só vale se deixar mais barato que o preço atual.
           const promoQty = promo && promo.promoPriceCents < normalCents ? await this.promotionService.consume(promo, quantity, session) : 0;
-          if (promoQty > 0) {
-            items.push({ ...base, unitPriceCents: promo!.promoPriceCents, quantity: promoQty, totalCents: promo!.promoPriceCents * promoQty, promotionId: promo!._id });
-            totalCents += promo!.promoPriceCents * promoQty;
-          }
-          const rest = quantity - promoQty; // passou do limite: o resto sai pelo preço normal
-          if (rest > 0) {
-            items.push({ ...base, unitPriceCents: normalCents, quantity: rest, totalCents: normalCents * rest });
-            totalCents += normalCents * rest;
+          // Cada linha: preço base (promoção até o limite, depois o normal) + o adicional das opções escolhidas.
+          for (const part of splitPromoUnits(g.lines, promoQty, promo?.promoPriceCents ?? 0, normalCents)) {
+            items.push({
+              ...base, unitPriceCents: part.unitCents, quantity: part.quantity, totalCents: part.unitCents * part.quantity,
+              ...(part.promo ? { promotionId: promo!._id } : {}),
+              ...(part.line.picked.length ? { options: part.line.picked } : {}), ...(part.line.note ? { note: part.line.note } : {}),
+            });
+            totalCents += part.unitCents * part.quantity;
           }
         }
 

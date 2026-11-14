@@ -2,7 +2,9 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { PosConfig, PosPayment, PosPaymentDocument, type PosProvider } from './schema/pos.schema';
-import { PosChargeDto, PosConfigDto } from './dto';
+import { PosChargeDto, PosConfigDto, TapResultDto } from './dto';
+import { randomBytes } from 'crypto';
+import { digits, docOk, HANDLE_RE, judgeTapResult, maxInstallments, normalizeHandle, returnUrlOk, tapDeeplink } from './tap.rules';
 import { StoneClient } from './stone.client';
 import { MercadoPagoClient } from '../mercadopago/mercadopago.client';
 import { SaleService } from '../sale/sale.service';
@@ -16,8 +18,8 @@ import { TabService } from '../store/tab.service';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
 
 const MIN = 60_000;
-const TTL: Record<PosProvider, number> = { mp_point: 15 * MIN, stone: 15 * MIN, mp_pix: 30 * MIN, pix_key: 30 * MIN };
-export const PROVIDER_LABEL: Record<PosProvider, string> = { mp_point: 'Maquininha Mercado Pago', stone: 'Maquininha Stone', mp_pix: 'Pix (Mercado Pago)', pix_key: 'Pix na chave da loja' };
+const TTL: Record<PosProvider, number> = { mp_point: 15 * MIN, stone: 15 * MIN, mp_pix: 30 * MIN, pix_key: 30 * MIN, infinitetap: 15 * MIN };
+export const PROVIDER_LABEL: Record<PosProvider, string> = { mp_point: 'Maquininha Mercado Pago', stone: 'Maquininha Stone', mp_pix: 'Pix (Mercado Pago)', pix_key: 'Pix na chave da loja', infinitetap: 'Celular (InfiniteTap)' };
 
 /**
  * Cobrança no balcão: manda o valor para a maquininha (Mercado Pago Point ou Stone) ou mostra o QR do Pix.
@@ -43,7 +45,7 @@ export class PosService {
   private async cfg(eid: string, withSecret = false) {
     const q = this.configs.findOne({ enterpriseId: new Types.ObjectId(eid) });
     if (withSecret) q.select('+stone.skSealed');
-    return (await q.lean()) ?? { pix: { mode: 'off', keyType: 'cnpj', key: '', holder: '', city: '' }, point: { enabled: false, terminalId: '', label: '' }, stone: { enabled: false, serial: '', skHint: '', skSealed: null } } as unknown as PosConfig;
+    return (await q.lean()) ?? { pix: { mode: 'off', keyType: 'cnpj', key: '', holder: '', city: '' }, point: { enabled: false, terminalId: '', label: '' }, stone: { enabled: false, serial: '', skHint: '', skSealed: null }, tap: { enabled: false, handle: '', doc: '' } } as unknown as PosConfig;
   }
 
   private async mpToken(eid: string): Promise<string | null> {
@@ -58,14 +60,16 @@ export class PosService {
     const pixKeyOk = c.pix?.mode === 'key' && !!normalizePixKey(c.pix.keyType, c.pix.key) && !!c.pix.holder;
     const stoneOk = !!(c.stone?.enabled && c.stone.serial && c.stone.skHint && this.stone.partnerReady);
     const pointOk = !!(c.point?.enabled && c.point.terminalId && mpConnected);
+    const tapOk = !!(c.tap?.enabled && c.tap.handle);
     return {
       pix: { mode: c.pix?.mode ?? 'off', keyType: c.pix?.keyType ?? 'cnpj', key: c.pix?.key ?? '', holder: c.pix?.holder ?? '', city: c.pix?.city ?? '' },
       point: { enabled: !!c.point?.enabled, terminalId: c.point?.terminalId ?? '', label: c.point?.label ?? '' },
       stone: { enabled: !!c.stone?.enabled, serial: c.stone?.serial ?? '', skHint: c.stone?.skHint ?? '', partnerReady: this.stone.partnerReady },
+      tap: { enabled: !!c.tap?.enabled, handle: c.tap?.handle ?? '', doc: c.tap?.doc ?? '' },
       mp: { connected: mpConnected, nickname: store.mp?.nickname ?? '' },
       /** O que o caixa pode usar agora, na ordem de preferência. */
       available: {
-        card: [...(pointOk ? ['mp_point'] : []), ...(stoneOk ? ['stone'] : [])] as PosProvider[],
+        card: [...(pointOk ? ['mp_point'] : []), ...(stoneOk ? ['stone'] : []), ...(tapOk ? ['infinitetap'] : [])] as PosProvider[],
         pix: [...(c.pix?.mode === 'mercadopago' && mpConnected ? ['mp_pix'] : []), ...(pixKeyOk ? ['pix_key'] : []), ...(pointOk ? ['mp_point'] : []), ...(stoneOk ? ['stone'] : [])] as PosProvider[],
       },
     };
@@ -90,6 +94,16 @@ export class PosService {
       if (dto.stone.enabled !== undefined) set['stone.enabled'] = dto.stone.enabled;
       if (dto.stone.serial !== undefined) set['stone.serial'] = dto.stone.serial.trim();
       if (dto.stone.secretKey !== undefined) { const k = dto.stone.secretKey.trim(); set['stone.skSealed'] = k ? seal(k) : null; set['stone.skHint'] = k ? `…${k.slice(-4)}` : ''; }
+    }
+    if (dto.tap) {
+      const cur = (await this.cfg(eid)).tap ?? { enabled: false, handle: '', doc: '' };
+      const handle = dto.tap.handle !== undefined ? normalizeHandle(dto.tap.handle) : cur.handle;
+      const doc = dto.tap.doc !== undefined ? digits(dto.tap.doc) : cur.doc;
+      const enabled = dto.tap.enabled ?? cur.enabled;
+      if (handle && !HANDLE_RE.test(handle)) throw new UnprocessableEntityException('InfiniteTag inválida: use letras, números, ponto, traço ou sublinhado');
+      if (!docOk(doc)) throw new UnprocessableEntityException('Documento da conta InfinitePay: CPF (11 números) ou CNPJ (14 números)');
+      if (enabled && !handle) throw new UnprocessableEntityException('Informe a InfiniteTag da conta InfinitePay para ligar o Tap');
+      set.tap = { enabled, handle, doc };
     }
     if (Object.keys(set).length) await this.configs.updateOne({ enterpriseId: new Types.ObjectId(eid) }, { $set: set }, { upsert: true });
     return this.view(eid);
@@ -122,7 +136,7 @@ export class PosService {
     const ref = `balcao-${id}`;
     const base = {
       _id: id, enterpriseId: eoid, provider: dto.provider, method: dto.method, installments: dto.method === 'credit' ? dto.installments ?? 1 : 1, amountCents: totalCents,
-      items: dto.tabId ? [] : dto.items.map((i) => ({ productId: i.productId, quantity: i.quantity })), ...(dto.discount && !dto.tabId ? { discount: dto.discount } : {}), tabId: dto.tabId ? new Types.ObjectId(dto.tabId) : null, staff, customerId: dto.customerId ? new Types.ObjectId(dto.customerId) : null,
+      items: dto.tabId ? [] : dto.items.map((i) => ({ productId: i.productId, quantity: i.quantity, ...(i.options?.length ? { options: i.options.map((o) => ({ g: o.g, i: o.i, q: o.q })) } : {}), ...(i.note?.trim() ? { note: i.note.trim() } : {}) })), ...(dto.discount && !dto.tabId ? { discount: dto.discount } : {}), tabId: dto.tabId ? new Types.ObjectId(dto.tabId) : null, staff, customerId: dto.customerId ? new Types.ObjectId(dto.customerId) : null,
       expiresAt: new Date(Date.now() + TTL[dto.provider]), ...(dto.clientKey ? { clientKey: dto.clientKey } : {}),
     };
     const ent = await this.enterprises.findEnterpriseById(eid);
@@ -147,6 +161,15 @@ export class PosService {
         const o = await this.mp.createPointOrder({ accessToken: token, terminalId: c.point.terminalId, amountCents: totalCents, reference: ref, idem: `pos-${id}`, type, installments: base.installments, description: `Venda ${ent.name}` });
         extra = { providerRef: o.id };
       }
+    } else if (dto.provider === 'infinitetap') {
+      if (dto.method === 'pix') throw new BadRequestException('O Tap cobra só cartão (crédito ou débito)');
+      if (!c.tap?.enabled || !c.tap.handle) throw new ConflictException('Ligue o Tap da InfinitePay em Configurações → Pagamentos no balcão');
+      if (!dto.returnUrl || !returnUrlOk(dto.returnUrl, process.env.NODE_ENV !== 'production')) throw new BadRequestException('Endereço de retorno inválido para o Tap');
+      if (totalCents < 100) throw new UnprocessableEntityException('O Tap da InfinitePay cobra a partir de R$ 1,00');
+      if (base.installments > maxInstallments(totalCents)) throw new UnprocessableEntityException(`Em ${base.installments}x cada parcela ficaria abaixo de R$ 1,00`);
+      // Segredo de uso único desta cobrança: só o retorno com ele vale (ver tap.rules.ts).
+      const orderId = randomBytes(16).toString('hex');
+      extra = { providerRef: orderId, deeplink: tapDeeplink({ amountCents: totalCents, method: dto.method, installments: base.installments, orderId, resultUrl: dto.returnUrl, handle: c.tap.handle, doc: c.tap.doc }) };
     } else {
       const sk = open(c.stone?.skSealed);
       if (!c.stone?.enabled || !sk || !c.stone.serial) throw new ConflictException('Configure a maquininha Stone em Configurações → Pagamentos no balcão');
@@ -179,6 +202,8 @@ export class PosService {
       if (expired) return this.fail(p, 'Tempo do QR Code esgotado', 'canceled');
       return p;
     }
+    // InfiniteTap: não há como perguntar à InfinitePay; só o retorno no app paga (tapResult).
+    if (p.provider === 'infinitetap') return expired ? this.fail(p, 'Tempo esgotado sem retorno da InfinitePay', 'canceled') : p;
     const eid = String(p.enterpriseId);
     try {
       if (p.provider === 'stone') {
@@ -209,6 +234,37 @@ export class PosService {
     if (p.status !== 'pending') return this.present(p);
     p.confirmedBy = actor;
     return this.present(await this.finalize(p, { methodType: 'pix' }));
+  }
+
+  /**
+   * Retorno do InfiniteTap (o app repassa o que a InfinitePay mandou no deep link). Só paga a cobrança pendente desta
+   * loja com o mesmo `order_id`, dentro do prazo, recebida na conta configurada e com um NSU nunca usado.
+   */
+  async tapResult(eid: string, id: string, dto: TapResultDto) {
+    const p = await this.one(eid, id);
+    if (p.provider !== 'infinitetap') throw new BadRequestException('Esta cobrança não é do Tap');
+    // Mesmo retorno chegando de novo (app reaberto): devolve o resultado já registrado.
+    if (p.status === 'paid' && p.detail?.paymentId && p.detail.paymentId === (dto.nsu ?? '').trim()) return this.present(p.saleId ? p : await this.finalize(p, {}));
+    const tap = (await this.cfg(eid)).tap ?? { enabled: false, handle: '', doc: '' };
+    const v = judgeTapResult({ orderId: p.providerRef, status: p.status, expiresAt: p.expiresAt }, tap, dto);
+    if (!v.ok) {
+      this.logger.warn(`Retorno do Tap recusado na cobrança ${p._id}: ${v.code}`);
+      if (v.code === 'TAP_NOT_PAID') return this.present(await this.fail(p, v.reason));
+      throw new ConflictException({ statusCode: 409, code: v.code, message: v.reason });
+    }
+    let paid: PosPaymentDocument | null;
+    try {
+      paid = await this.payments.findOneAndUpdate(
+        { _id: p._id, status: 'pending', providerRef: p.providerRef },
+        { $set: { status: 'paid', paidAt: new Date(), detail: { paymentId: v.nsu, authCode: v.aut, brand: v.brand, installments: p.installments, methodType: p.method } } },
+        { new: true },
+      );
+    } catch (e) {
+      if (isDuplicateKeyError(e)) throw new ConflictException({ statusCode: 409, code: 'TAP_NSU_USED', message: 'Esta transação da InfinitePay já pagou outra venda.' });
+      throw e;
+    }
+    if (!paid) return this.present((await this.payments.findById(p._id))!);
+    return this.present(await this.finalize(paid, {}));
   }
 
   async cancel(eid: string, id: string) {
@@ -257,7 +313,7 @@ export class PosService {
         return (await this.payments.findById(p._id))!;
       }
       const sale = await this.sales.create(String(p.enterpriseId), {
-        paymentMethod: p.method === 'pix' ? 'pix' : 'card', items: p.items, ...(p.customerId ? { customerId: String(p.customerId) } : {}),
+        paymentMethod: p.method === 'pix' ? 'pix' : 'card', items: p.items.map((i) => ({ productId: String(i.productId), quantity: i.quantity, ...(i.options?.length ? { options: i.options.map((o) => ({ g: o.g, i: o.i, q: o.q })) } : {}), ...(i.note ? { note: i.note } : {}) })), ...(p.customerId ? { customerId: String(p.customerId) } : {}),
         ...(p.discount?.value ? { discount: { mode: p.discount.mode, value: p.discount.value, ...(p.discount.reason ? { reason: p.discount.reason } : {}) } } : {}),
       }, `pos:${p._id}`, {
         provider: p.provider, method: p.method, installments: p.installments, amountCents: p.amountCents, reference: p.providerRef || String(p._id),
@@ -285,7 +341,7 @@ export class PosService {
     const sale = p.saleId ? await this.sales.findById(String(p.enterpriseId), String(p.saleId)).catch(() => null) : null;
     return {
       id: String(p._id), status: p.status, provider: p.provider, providerLabel: PROVIDER_LABEL[p.provider], method: p.method, installments: p.installments,
-      amountCents: p.amountCents, qrCode: p.qrCode, qrBase64: p.qrBase64, expiresAt: p.expiresAt, paidAt: p.paidAt, failReason: p.failReason,
+      amountCents: p.amountCents, qrCode: p.qrCode, qrBase64: p.qrBase64, deeplink: p.status === 'pending' ? p.deeplink ?? null : null, expiresAt: p.expiresAt, paidAt: p.paidAt, failReason: p.failReason,
       detail: p.detail ?? null, saleId: p.saleId ? String(p.saleId) : null, sale,
     };
   }

@@ -22,10 +22,14 @@ export class PosConfig {
     skSealed: { type: String, default: null, select: false }, skHint: { type: String, default: '' },
   }))
   stone: { enabled: boolean; serial: string; skSealed?: string | null; skHint: string };
+
+  /** InfiniteTap: o celular vira maquininha pelo app da InfinitePay. `handle` = InfiniteTag da conta que recebe. */
+  @Prop(raw({ enabled: { type: Boolean, default: false }, handle: { type: String, default: '' }, doc: { type: String, default: '' } }))
+  tap: { enabled: boolean; handle: string; doc: string };
 }
 export const PosConfigSchemaFactory = SchemaFactory.createForClass(PosConfig);
 
-export type PosProvider = 'mp_point' | 'mp_pix' | 'stone' | 'pix_key';
+export type PosProvider = 'mp_point' | 'mp_pix' | 'stone' | 'pix_key' | 'infinitetap';
 export type PosStatus = 'pending' | 'paid' | 'failed' | 'canceled';
 export type PosPaymentDocument = HydratedDocument<PosPayment>;
 
@@ -40,7 +44,7 @@ export class PosPayment {
   @Prop({ default: 1 }) installments: number;
   @Prop({ type: String, enum: ['pending', 'paid', 'failed', 'canceled'], default: 'pending', index: true }) status: PosStatus;
   @Prop({ required: true, min: 1 }) amountCents: number;
-  @Prop({ type: [{ productId: String, quantity: Number, _id: false }], default: [] }) items: { productId: string; quantity: number }[];
+  @Prop({ type: [{ productId: String, quantity: Number, options: { type: [{ g: String, i: String, q: Number, _id: false }], default: undefined }, note: String, _id: false }], default: [] }) items: { productId: string; quantity: number; options?: { g: string; i: string; q: number }[]; note?: string }[];
   /** Desconto do carrinho, repassado para a venda quando o pagamento confirma. */
   @Prop(raw({ mode: String, value: Number, reason: String, _id: false })) discount?: { mode: 'percent' | 'amount'; value: number; reason?: string } | null;
   @Prop({ type: MongooseSchema.Types.ObjectId, default: null }) customerId: Types.ObjectId | null;
@@ -52,6 +56,8 @@ export class PosPayment {
   @Prop({ default: '' }) providerRef: string;
   @Prop({ type: String, default: null }) qrCode: string | null;
   @Prop({ type: String, default: null }) qrBase64: string | null;
+  /** InfiniteTap: deep link que abre o app da InfinitePay com esta cobrança. */
+  @Prop({ type: String, default: null }) deeplink: string | null;
   @Prop({ type: Date, required: true }) expiresAt: Date;
   @Prop(raw({ paymentId: String, brand: String, installments: Number, authCode: String, methodType: String })) detail?: { paymentId?: string | null; brand?: string | null; installments?: number | null; authCode?: string | null; methodType?: string | null } | null;
   @Prop({ type: Date, default: null }) paidAt: Date | null;
@@ -65,3 +71,5 @@ export class PosPayment {
 export const PosPaymentSchemaFactory = SchemaFactory.createForClass(PosPayment);
 PosPaymentSchemaFactory.index({ enterpriseId: 1, clientKey: 1 }, { unique: true, partialFilterExpression: { clientKey: { $type: 'string' } } });
 PosPaymentSchemaFactory.index({ status: 1, createdAt: -1 });
+// Cada transação do InfiniteTap (NSU) paga uma cobrança só: o mesmo retorno não fecha duas vendas.
+PosPaymentSchemaFactory.index({ 'detail.paymentId': 1 }, { unique: true, partialFilterExpression: { provider: 'infinitetap', 'detail.paymentId': { $type: 'string' } } });

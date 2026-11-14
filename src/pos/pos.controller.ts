@@ -3,7 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { IsString, MaxLength } from 'class-validator';
 import { CurrentEnterprise } from '../common/decorators/current-enterprise.decorator';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
-import { PosChargeDto, PosConfigDto } from './dto';
+import { PosChargeDto, PosConfigDto, TapResultDto } from './dto';
 import { PosService } from './pos.service';
 
 class TerminalDto { @IsString() @MaxLength(80) terminalId: string }
@@ -34,6 +34,11 @@ export class PosController {
   /** Pix na chave: o caixa conferiu no banco que o dinheiro caiu. */
   @Post('charges/:id/confirm') @HttpCode(200)
   confirm(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Req() req: { user?: { email?: string } }) { return this.pos.confirm(eid, id, req.user?.email ?? 'caixa'); }
+
+  /** Retorno do InfiniteTap: o app repassa o resultado que a InfinitePay devolveu no deep link. */
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Post('charges/:id/tap-result') @HttpCode(200)
+  tapResult(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: TapResultDto) { return this.pos.tapResult(eid, id, dto); }
 
   @Post('charges/:id/cancel') @HttpCode(200)
   cancel(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) { return this.pos.cancel(eid, id); }
