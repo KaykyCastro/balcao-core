@@ -78,6 +78,27 @@ seudominio.com.br {
 O site fica dentro de `handle { }` de propósito: solto, o `try_files` troca o caminho por `/index.html` antes do teste do link mágico.
 `sudo systemctl reload caddy`. O Caddy emite e renova o certificado sozinho. Com o Caddy na frente, use `TRUST_PROXY=1`.
 
+**Com Nginx em vez do Caddy** (link mágico): no `http { }` (ex.: `/etc/nginx/conf.d/previa.conf`):
+```
+map $http_user_agent $previa_bot {
+  default 0;
+  "~*(facebookexternalhit|facebot|whatsapp|twitterbot|linkedinbot|slackbot|telegrambot|discordbot|pinterest|skypeuripreview|redditbot|embedly|iframely|vkshare|snapchat|bitlybot|tumblr|mastodon|applebot)" 1;
+}
+map $request_uri $previa_path { "~^(?<p>[^?]*)" $p; }
+```
+e no `server { }` do site:
+```
+location /loja/ {
+  if ($previa_bot) { rewrite ^ /__previa last; }
+  try_files $uri /index.html;
+}
+location = /__previa {
+  internal;
+  proxy_pass http://127.0.0.1:2700/public/share?path=$previa_path;
+}
+```
+`nginx -t && systemctl reload nginx`.
+
 ### Domínio próprio das lojas (minhaloja.com.br)
 O lojista liga em **Loja online → Sua loja → Domínio próprio**. O Caddy emite o HTTPS de cada domínio na primeira visita,
 mas só se a API disser que o domínio é de uma loja ativa (`/public/domains/allow`). No **começo** do `/etc/caddy/Caddyfile`:
