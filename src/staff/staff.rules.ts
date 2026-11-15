@@ -28,6 +28,8 @@ const RULES: Rule[] = [
   { re: /^\/sale(\/.*)?$/, read: ['sales', 'reports'], write: ['sales'] },
   { re: /^\/pos\/config$/, read: ['sales', 'tables'] },
   { re: /^\/pos\/charges(\/.*)?$/, read: ['sales', 'tables'], write: ['sales', 'tables'] },
+  // fechamento de caixa: quem vende vê e fecha o dia de hoje; outros dias e o histórico só com relatórios (o service confere)
+  { re: /^\/cash-close(\/.*)?$/, read: ['sales', 'reports'], write: ['sales', 'reports'] },
   { re: /^\/report\/popular-products$/, read: ['sales', 'tables', 'reports'] },
   { re: /^\/report\/stock(\/.*)?$/, read: ['stock', 'reports'] },
   { re: /^\/report(\/.*)?$/, read: ['reports'] },
