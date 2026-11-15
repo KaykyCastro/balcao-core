@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { Controller, Get, NotFoundException, Param, Query, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
@@ -76,8 +77,10 @@ export class ShareController {
     return { ...storeMeta(info, base, this.storeImage(store, enterprise)), imageSize: { w: W, h: H } };
   }
 
-  private storeImage(store: { slug: string; banner?: string; slides?: { image: string }[]; logo?: string }, ent: { logo?: string }) {
-    return store.banner || store.slides?.find((x) => x.image)?.image || store.logo || ent.logo ? `${this.api}/public/store/${store.slug}/share.jpg` : `${this.front}/og-image.jpg?v=2`;
+  private storeImage(store: { slug: string; banner?: string; slides?: { image: string }[]; logo?: string; seo?: { image?: string } }, ent: { logo?: string }) {
+    const src = store.seo?.image || store.banner || store.slides?.find((x) => x.image)?.image || store.logo || ent.logo;
+    // `v` muda quando a imagem muda: WhatsApp e Facebook guardam a prévia pelo endereço, então a capa nova aparece.
+    return src ? `${this.api}/public/store/${store.slug}/share.jpg?v=${createHash('sha1').update(src).digest('hex').slice(0, 8)}` : `${this.front}/og-image.jpg?v=2`;
   }
 
   @Get('store/:slug/products/:id/share.jpg')
@@ -90,7 +93,8 @@ export class ShareController {
   @Get('store/:slug/share.jpg')
   async storeShareImage(@Param('slug') slug: string, @Res() res: Response) {
     const { store, enterprise } = await this.stores.publicBySlug(slug);
-    const wide = store.banner || store.slides?.find((x) => x.image)?.image;
+    // Capa escolhida pelo lojista para o link; sem ela, o banner ou o primeiro slide (recortados) ou a logo (inteira).
+    const wide = store.seo?.image || store.banner || store.slides?.find((x) => x.image)?.image;
     return this.jpeg(wide || store.logo || enterprise.logo || '', wide ? 'cover' : 'contain', res);
   }
 

@@ -158,6 +158,8 @@ class SeoDto {
   @IsOptional() @IsString() @MaxLength(70) title?: string;
   @IsOptional() @IsString() @MaxLength(160) description?: string;
   @IsOptional() @ValidateIf((o) => o.favicon !== '') @IsString() @MaxLength(140_000) @Matches(FAVICON_RE, { message: 'Favicon: use uma imagem PNG, ICO ou WebP' }) favicon?: string;
+  /** Capa do link compartilhado (endereço da imagem enviada; vazio = usar banner, slide ou logo). */
+  @IsOptional() @ValidateIf((o) => o.image !== '') @IsString() @MaxLength(2048) @Matches(/^https:\/\//, { message: 'Capa do link: envie uma imagem' }) image?: string;
 }
 
 /** Cashback da loja: de 1% a 20% (em pontos-base) e validade do crédito de 30 a 365 dias. */

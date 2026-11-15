@@ -26,8 +26,8 @@ import { crossTenant } from '../common/security/tenant-guard.plugin';
 export interface PricedLine { productId: string; name: string; quantity: number; unitCents: number; /** Adicionais (já somados em unitCents). */ extraCents?: number; options?: PickedOption[]; note?: string; dims: { weightGrams?: number | null; heightCm?: number | null; widthCm?: number | null; lengthCm?: number | null } }
 
 /** Imagens que a loja usa (para saber o que apagar do R2 quando saem). */
-function storeImages(s: { logo?: string; banner?: string; slides?: { image?: string }[]; seo?: { favicon?: string }; page?: SitePage | null; pageDraft?: SitePage | null }) {
-  return [s.logo, s.banner, s.seo?.favicon, ...(s.slides ?? []).map((x) => x.image), ...pageUrls(s.page), ...pageUrls(s.pageDraft)].filter((x): x is string => !!x);
+function storeImages(s: { logo?: string; banner?: string; slides?: { image?: string }[]; seo?: { favicon?: string; image?: string }; page?: SitePage | null; pageDraft?: SitePage | null }) {
+  return [s.logo, s.banner, s.seo?.favicon, s.seo?.image, ...(s.slides ?? []).map((x) => x.image), ...pageUrls(s.page), ...pageUrls(s.pageDraft)].filter((x): x is string => !!x);
 }
 
 /** Campos que só mudam a aparência da loja: salvar só eles não refaz a checagem de "pode ficar no ar". */
@@ -215,6 +215,7 @@ export class StoreService {
     if (set.logo !== undefined) set.logo = await this.storage.resolve(enterpriseId, 'store', set.logo as string);
     if (set.banner !== undefined) set.banner = await this.storage.resolve(enterpriseId, 'store', set.banner as string);
     if (set['seo.favicon'] !== undefined) set['seo.favicon'] = await this.storage.resolve(enterpriseId, 'favicon', set['seo.favicon'] as string);
+    if (set['seo.image'] !== undefined) set['seo.image'] = await this.storage.resolve(enterpriseId, 'store', set['seo.image'] as string);
     if (set.slides) {
       for (const x of set.slides as { image: string; video: string }[]) {
         x.image = await this.storage.resolve(enterpriseId, 'store', x.image);
@@ -232,7 +233,7 @@ export class StoreService {
     // Imagens que saíram da loja (trocou o logo, tirou um banner...): apaga do R2. Vídeos ficam na biblioteca.
     const gone = removedUrls(filesBefore, storeImages({
       logo: (set.logo as string | undefined) ?? current.logo, banner: (set.banner as string | undefined) ?? current.banner,
-      slides: (set.slides as { image?: string }[] | undefined) ?? current.slides, seo: { favicon: (set['seo.favicon'] as string | undefined) ?? current.seo?.favicon }, page: current.page, pageDraft: current.pageDraft,
+      slides: (set.slides as { image?: string }[] | undefined) ?? current.slides, seo: { favicon: (set['seo.favicon'] as string | undefined) ?? current.seo?.favicon, image: (set['seo.image'] as string | undefined) ?? current.seo?.image }, page: current.page, pageDraft: current.pageDraft,
     }));
     if (gone.length) await this.storage.release(enterpriseId, gone);
     // Só fica no ar com pagamento e entrega configurados. Mudança só de aparência (aba Tema do construtor, logo, banners,

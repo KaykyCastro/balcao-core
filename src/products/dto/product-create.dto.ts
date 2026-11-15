@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsMongoId, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsMongoId, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf } from 'class-validator';
 import { ArrayMaxSize, IsArray } from 'class-validator';
 
 export const MAX_IMAGES = 8;
@@ -35,6 +35,13 @@ export class ProductCreateDto {
 
   @IsOptional() @IsNumber() @Min(0) @Max(100)
   discountPercentage?: number;
+
+  /** Desconto em reais (centavos), quando `discountMode` = 'amount'. */
+  @IsOptional() @IsInt() @Min(0) @Max(1_000_000_000)
+  discountCents?: number;
+
+  @IsOptional() @IsIn(['percent', 'amount'])
+  discountMode?: 'percent' | 'amount';
 
   @IsOptional() @ValidateIf((o) => o.image !== '') @IsString() @MaxLength(400_000) @Matches(IMAGE_RE, { message: 'Imagem inválida' })
   image?: string;

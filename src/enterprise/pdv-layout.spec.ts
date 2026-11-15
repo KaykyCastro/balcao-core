@@ -19,6 +19,8 @@ describe('sanitizePdvLayout (layout da tela de vendas compartilhado)', () => {
     expect(sanitizePdvLayout({ pageBg: '#FFF1EA' })).toEqual({ pageBg: '#FFF1EA' });
     expect(sanitizePdvLayout({ pageBg: null })).toEqual({ pageBg: null });
     expect(sanitizePdvLayout({ pageBg: 'url(x)' })).toEqual({});
+    expect(sanitizePdvLayout({ cardBg: '#1F2937', cartBg: '#FFF8DB' })).toEqual({ cardBg: '#1F2937', cartBg: '#FFF8DB' });
+    expect(sanitizePdvLayout({ cardBg: null, cartBg: 'red' })).toEqual({ cardBg: null });
   });
 
   it('accent null volta para a cor do painel', () => {

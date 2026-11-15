@@ -32,6 +32,10 @@ export class ProductSchema {
   @Prop({ default: 0, min: 0, max: 100 })
   discountPercentage: number;
 
+  /** Como o desconto foi digitado no cadastro (em % ou em R$); o preço cobrado é sempre `priceWithDiscount`. */
+  @Prop({ type: String, enum: ['percent', 'amount'], default: 'percent' })
+  discountMode: 'percent' | 'amount';
+
   /** Foto de capa (= a primeira de `images`). Vai nas listagens; as demais só no detalhe. */
   @Prop()
   image: string;

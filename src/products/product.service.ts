@@ -1,3 +1,4 @@
+import { fromFinalPrice, productDiscount, type DiscountMode } from './discount.rules';
 import { StorageService } from '../storage/storage.service';
 import { OptionsError, sanitizeOptions, type OptionGroup } from './options.rules';
 import { removedUrls } from '../storage/storage.rules';
@@ -40,9 +41,7 @@ export class ProductService {
   async create(enterpriseId: string, dto: ProductCreateDto): Promise<ProductDocument> {
     await this.categoryService.findCategoryById(enterpriseId, dto.categoryId);
 
-    const priceWithDiscount =
-      dto.priceWithDiscount ??
-      (dto.discountPercentage ? round2(dto.price * (1 - dto.discountPercentage / 100)) : 0);
+    const disc = discountOf(Math.round(dto.price * 100), dto);
 
     try {
       const trackStock = dto.trackStock !== false;
@@ -55,7 +54,7 @@ export class ProductService {
         trackStock,
         quantity: trackStock ? dto.quantity ?? 0 : 0,
         description: dto.description ?? '',
-        priceWithDiscount,
+        priceWithDiscount: disc.priceWithDiscount, discountPercentage: disc.discountPercentage, discountMode: disc.discountMode,
         enterpriseId,
       });
       return withImages(created);
@@ -112,11 +111,17 @@ export class ProductService {
       set.image = (set.images as string[])[0] ?? '';
     }
     if (dto.trackStock === false) set.quantity = 0; // ilimitado: não guarda saldo
-    // Só percentual enviado: recalcula o preço com desconto a partir do preço (novo ou atual).
-    if (dto.discountPercentage !== undefined && dto.priceWithDiscount === undefined) {
-      const price = dto.price ?? (await this.getProductById(enterpriseId, id)).price;
-      set.priceWithDiscount = dto.discountPercentage ? round2(price * (1 - dto.discountPercentage / 100)) : 0;
+    // Desconto (em % ou em R$) ou só o preço mudou: recalcula o preço cobrado. Mudando só o preço, o desconto continua
+    // do mesmo jeito que foi dado (mesma porcentagem, ou os mesmos reais a menos).
+    const touchesDiscount = dto.discountPercentage !== undefined || dto.priceWithDiscount !== undefined || dto.discountCents !== undefined || dto.discountMode !== undefined;
+    if (touchesDiscount || dto.price !== undefined) {
+      const cur = await this.getProductById(enterpriseId, id);
+      const priceCents = Math.round((dto.price ?? cur.price) * 100);
+      const keep = { discountMode: cur.discountMode ?? 'percent', discountPercentage: cur.discountPercentage, discountCents: cur.priceWithDiscount ? Math.round(cur.price * 100) - Math.round(cur.priceWithDiscount * 100) : 0 };
+      const d = discountOf(priceCents, touchesDiscount ? dto : (cur.priceWithDiscount ? keep : {}));
+      Object.assign(set, d);
     }
+    delete set.discountCents;
 
     try {
       const updated = await this.productModel.findOneAndUpdate(
@@ -303,4 +308,14 @@ export class ProductService {
     ]);
     return new Map(rows.map((r) => [String(r._id), r.n]));
   }
+}
+
+/** Lê o desconto enviado (R$, % ou preço final) e devolve os três campos do produto; desconto inválido = 400. */
+function discountOf(priceCents: number, d: { discountMode?: 'percent' | 'amount'; discountCents?: number; discountPercentage?: number; priceWithDiscount?: number }) {
+  const mode: DiscountMode = d.discountMode ?? (d.discountCents !== undefined ? 'amount' : 'percent');
+  const r = mode === 'amount' && d.discountCents !== undefined ? productDiscount(priceCents, 'amount', d.discountCents)
+    : d.priceWithDiscount !== undefined && d.discountPercentage === undefined ? fromFinalPrice(priceCents, Math.round(d.priceWithDiscount * 100))
+    : productDiscount(priceCents, 'percent', d.discountPercentage ?? 0);
+  if ('error' in r) throw new BadRequestException({ statusCode: 400, code: 'DISCOUNT_INVALID', message: r.error });
+  return { priceWithDiscount: r.priceWithDiscountCents / 100, discountPercentage: r.percent, discountMode: r.priceWithDiscountCents ? mode : 'percent' as DiscountMode };
 }

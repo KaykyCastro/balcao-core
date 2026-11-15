@@ -27,6 +27,9 @@ const LAYOUT: Record<string, (v: unknown) => unknown> = {
   popularLimit: int(1, 48),
   accent: (v) => (v === null ? null : hex(v)),
   pageBg: (v) => (v === null ? null : hex(v)),
+  /** Cor dos cartões de produto e do quadro do carrinho (null = automática, pelo fundo do caixa). */
+  cardBg: (v) => (v === null ? null : hex(v)),
+  cartBg: (v) => (v === null ? null : hex(v)),
   cartSide: oneOf(['right', 'left']),
   density: oneOf(['comfortable', 'compact']),
   textSize: oneOf(['sm', 'md', 'lg']),

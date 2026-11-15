@@ -131,9 +131,9 @@ export class Store {
   @Prop({ type: Date, default: null })
   pagePublishedAt: Date | null;
 
-  /** Aba do navegador e buscadores: título, descrição e favicon próprios. */
-  @Prop(raw({ title: { type: String, default: '' }, description: { type: String, default: '' }, favicon: { type: String, default: '' } }))
-  seo: { title: string; description: string; favicon: string };
+  /** Aba do navegador, buscadores e link compartilhado: título, descrição, favicon e a capa do link (WhatsApp, redes). */
+  @Prop(raw({ title: { type: String, default: '' }, description: { type: String, default: '' }, favicon: { type: String, default: '' }, image: { type: String, default: '' } }))
+  seo: { title: string; description: string; favicon: string; image: string };
 
   /**
    * Mesas (modo cardápio): o cliente lê o QR Code da mesa.
