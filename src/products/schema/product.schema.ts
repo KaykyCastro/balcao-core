@@ -98,6 +98,22 @@ ProductSchemaFactory.index({ enterpriseId: 1, showOnline: 1, categoryId: 1 });
 export const effectivePrice = (p: { price: number; priceWithDiscount?: number | null }): number =>
   p.priceWithDiscount ? p.priceWithDiscount : p.price;
 
-/** Preço de venda na loja online (reais): o próprio, se o lojista definiu; senão o mesmo do balcão. */
-export const onlineEffectivePrice = (p: { price: number; priceWithDiscount?: number | null; onlinePrice?: number | null }): number =>
-  p.onlinePrice && p.onlinePrice > 0 ? p.onlinePrice : effectivePrice(p);
+type OnlinePriced = { price: number; priceWithDiscount?: number | null; onlinePrice?: number | null; discountMode?: 'percent' | 'amount' | null; discountPercentage?: number | null };
+
+/** Preço cheio na loja online (reais), antes do desconto: o próprio, se o lojista definiu; senão o do balcão. */
+export const onlineFullPrice = (p: OnlinePriced): number => (p.onlinePrice && p.onlinePrice > 0 ? p.onlinePrice : p.price);
+
+/**
+ * Preço de venda na loja online (reais). Sem preço online próprio = o mesmo do balcão (com desconto). Com preço online
+ * próprio, o desconto do produto vale também lá, do mesmo jeito que foi dado: a mesma % ou os mesmos reais a menos
+ * (sem isso, o produto com desconto continuava com o preço cheio no site). Nunca abaixo de R$ 0,01.
+ */
+export const onlineEffectivePrice = (p: OnlinePriced): number => {
+  if (!(p.onlinePrice && p.onlinePrice > 0)) return effectivePrice(p);
+  const full = Math.round(p.onlinePrice * 100);
+  if (!p.priceWithDiscount || p.priceWithDiscount <= 0 || p.priceWithDiscount >= p.price) return full / 100;
+  const off = p.discountMode === 'amount'
+    ? Math.round(p.price * 100) - Math.round(p.priceWithDiscount * 100)
+    : Math.round((full * (p.discountPercentage || (1 - p.priceWithDiscount / p.price) * 100)) / 100);
+  return Math.max(1, full - off) / 100;
+};

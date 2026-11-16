@@ -18,7 +18,7 @@ import { EmailCodeService } from './email-code.service';
 import { autoConfirmOf, graceEnd, shipByOf } from './protection';
 import { canCancel, canMove, isPaidLike, modeOf, PAY_ON_DELIVERY_LABEL, ORDER_STATUS_LABEL, PAYMENT_WINDOW_MIN, trackingUrlFor, type OrderStatus } from './store.rules';
 import { ProductService } from '../products/product.service';
-import { onlineEffectivePrice } from '../products/schema/product.schema';
+import { onlineEffectivePrice, onlineFullPrice } from '../products/schema/product.schema';
 import { PromotionService } from '../promotion/promotion.service';
 import { SaleService } from '../sale/sale.service';
 import { SaleItem } from '../sale/schema/sale.schema';
@@ -167,7 +167,7 @@ export class OrderService {
           const p = (await this.products.publicMany(eid, [l.productId]))[0];
           const r = await this.products.decreaseQuantity(eid, l.productId, l.quantity, session);
           const normal = toCents(onlineEffectivePrice(p)); // preço da loja online (pode ser diferente do balcão)
-          const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), normal), stockTracked: r.tracked };
+          const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), toCents(onlineFullPrice(p)), normal), stockTracked: r.tracked };
           const pr = promos.get(l.productId);
           // Adicionais: o mesmo valor calculado em priceCart, somado ao preço da unidade (com ou sem promoção).
           const extra = l.extraCents ?? 0;

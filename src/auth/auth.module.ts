@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { SessionRenewInterceptor } from './session-renew.interceptor';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { LocalStrategy } from './strategies/local.strategy';
@@ -30,6 +32,6 @@ import { DesignModule } from '../design/design.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, LocalStrategy, JwtStrategy, TwoFactorService, GoogleService],
+  providers: [AuthService, LocalStrategy, JwtStrategy, TwoFactorService, GoogleService, { provide: APP_INTERCEPTOR, useClass: SessionRenewInterceptor }],
 })
 export class AuthModule {}

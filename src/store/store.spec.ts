@@ -505,7 +505,8 @@ describe('preço da loja online e banners', () => {
       expect(t.docs.get(r.orderId).items[0]).toMatchObject({ unitPriceCents: 17990, originalUnitPriceCents: 18990 });
     } finally { delete (prodA as any).onlinePrice; }
     expect(onlineEffectivePrice({ price: 100, priceWithDiscount: 90, onlinePrice: null })).toBe(90);
-    expect(onlineEffectivePrice({ price: 100, priceWithDiscount: 90, onlinePrice: 120 })).toBe(120);
+    // O desconto do produto (10%) vale também no preço online próprio: 120 − 10% = 108.
+    expect(onlineEffectivePrice({ price: 100, priceWithDiscount: 90, onlinePrice: 120 })).toBe(108);
   });
 
   it('banners: até 6, imagem válida e link só interno ou https', async () => {

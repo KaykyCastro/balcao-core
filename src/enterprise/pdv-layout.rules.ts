@@ -24,6 +24,8 @@ const LAYOUT: Record<string, (v: unknown) => unknown> = {
   products: oneOf(['grid', 'big', 'list']),
   showCode: bool, showStock: bool, showLogo: bool,
   subtitle: text(40),
+  /** Nome que a loja dá ao pagamento posterior (fiado) em toda a tela, histórico e comprovante; vazio = "Pagamento posterior". */
+  fiadoLabel: (v) => (typeof v === 'string' ? v.replace(CTRL, '').replace(/\s+/g, ' ').trim().slice(0, 24) : undefined),
   popularLimit: int(1, 48),
   accent: (v) => (v === null ? null : hex(v)),
   pageBg: (v) => (v === null ? null : hex(v)),

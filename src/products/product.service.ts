@@ -209,7 +209,14 @@ export class ProductService {
       { $expr: { $and: [{ $gt: ['$onlinePrice', 0] }, { $lt: ['$onlinePrice', '$price'] }] } },
       ...(q.promoIds?.length ? [{ _id: { $in: q.promoIds.map((x) => new Types.ObjectId(x)) } }] : []),
     ] });
-    const eff = { $cond: [{ $gt: [{ $ifNull: ['$onlinePrice', 0] }, 0] }, '$onlinePrice', { $cond: [{ $gt: [{ $ifNull: ['$priceWithDiscount', 0] }, 0] }, '$priceWithDiscount', '$price'] }] };
+    // Mesma conta de onlineEffectivePrice (para ordenar por preço): preço online próprio também leva o desconto do produto.
+    const hasDisc = { $and: [{ $gt: [{ $ifNull: ['$priceWithDiscount', 0] }, 0] }, { $lt: ['$priceWithDiscount', '$price'] }] };
+    const onlineDisc = { $cond: [{ $eq: ['$discountMode', 'amount'] },
+      { $subtract: ['$onlinePrice', { $subtract: ['$price', '$priceWithDiscount'] }] },
+      { $multiply: ['$onlinePrice', { $divide: ['$priceWithDiscount', '$price'] }] }] };
+    const eff = { $cond: [{ $gt: [{ $ifNull: ['$onlinePrice', 0] }, 0] },
+      { $cond: [hasDisc, { $max: [0.01, onlineDisc] }, '$onlinePrice'] },
+      { $cond: [{ $gt: [{ $ifNull: ['$priceWithDiscount', 0] }, 0] }, '$priceWithDiscount', '$price'] }] };
     const inStock = { $cond: [{ $or: [{ $eq: ['$trackStock', false] }, { $gt: ['$quantity', 0] }] }, 1, 0] };
     const sort: Record<string, 1 | -1> = q.sort === 'price_asc' ? { _eff: 1, name: 1 } : q.sort === 'price_desc' ? { _eff: -1, name: 1 } : q.sort === 'name' ? { name: 1 } : q.sort === 'new' ? { createdAt: -1 } : q.sort === 'sold' ? { soldCount: -1, createdAt: -1 } : { _stock: -1, updatedAt: -1, name: 1 };
     const match = { $and: and };

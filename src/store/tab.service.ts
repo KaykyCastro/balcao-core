@@ -11,7 +11,7 @@ import { StoreDocument } from './schema/store.schema';
 import { StoreService } from './store.service';
 import { modeOf } from './store.rules';
 import { ProductService } from '../products/product.service';
-import { onlineEffectivePrice } from '../products/schema/product.schema';
+import { onlineEffectivePrice, onlineFullPrice } from '../products/schema/product.schema';
 import { PromotionService } from '../promotion/promotion.service';
 import { SaleService } from '../sale/sale.service';
 import type { Sale, SaleDocument, SaleItem } from '../sale/schema/sale.schema';
@@ -173,7 +173,7 @@ export class TabService {
         const p = byId.get(pid)!;
         const r = await this.products.decreaseQuantity(eid, pid, quantity, session);
         const normal = toCents(onlineEffectivePrice(p));
-        const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), normal) + extra, stockTracked: r.tracked, note, by, at: now, status: 'new' as const, ...(options ? { options } : {}) };
+        const base = { productId: p._id as Types.ObjectId, productName: p.name, productCode: p.code, originalUnitPriceCents: Math.max(toCents(p.price), toCents(onlineFullPrice(p)), normal) + extra, stockTracked: r.tracked, note, by, at: now, status: 'new' as const, ...(options ? { options } : {}) };
         const pr = promos.get(pid);
         const promoQty = pr && pr.promoPriceCents < normal ? await this.promotions.consume(pr, quantity, session) : 0;
         if (promoQty > 0) added.push({ ...base, _id: new Types.ObjectId(), unitPriceCents: pr!.promoPriceCents + extra, quantity: promoQty, totalCents: (pr!.promoPriceCents + extra) * promoQty, promotionId: pr!._id as Types.ObjectId });

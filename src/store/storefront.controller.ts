@@ -17,7 +17,7 @@ import { CheckoutDto, PublicDisputeDto, EmailCodeDto, EmailVerifyDto, DirectoryQ
 import { ProductService } from '../products/product.service';
 import { PromotionService } from '../promotion/promotion.service';
 import { toCents } from '../common/money';
-import { onlineEffectivePrice } from '../products/schema/product.schema';
+import { onlineEffectivePrice, onlineFullPrice } from '../products/schema/product.schema';
 import { minExtraCents, type OptionGroup } from '../products/options.rules';
 
 export type P = Awaited<ReturnType<ProductService['publicGet']>> & { promotion?: { priceCents: number; remaining: number | null; endsAt: Date | null; name: string } | null };
@@ -30,7 +30,7 @@ export function card(p: P, showStock: boolean, store?: { slug: string; name: str
   return {
     id: String(p._id), name: p.name, description: p.description ?? '', image: p.image ?? '', categoryId: String(p.categoryId),
     priceCents: promo ? promo.priceCents : normal,
-    compareAtCents: promo ? Math.max(normal, toCents(p.price)) : toCents(p.price) > normal ? toCents(p.price) : null,
+    compareAtCents: promo ? Math.max(normal, toCents(p.price), toCents(onlineFullPrice(p))) : Math.max(toCents(p.price), toCents(onlineFullPrice(p))) > normal ? Math.max(toCents(p.price), toCents(onlineFullPrice(p))) : null,
     promo: promo ? { name: promo.name, remaining: promo.remaining, endsAt: promo.endsAt } : null,
     inStock: left === null || left > 0,
     stockLeft: showStock && left !== null ? left : left !== null && left > 0 && left <= 3 ? left : null, // "últimas unidades" sempre aparece

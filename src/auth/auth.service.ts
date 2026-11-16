@@ -13,6 +13,7 @@ import { RegisterDto } from './dto/register.dto';
 import { DUMMY_HASH, EnterpriseService } from '../enterprise/enterprise.service';
 import { EnterpriseDocument } from '../enterprise/schema/enterprise.schema';
 import { MailService } from '../mail/mail.service';
+import { webSessionLife } from './session-cookie';
 
 const MAX_FAILURES = 5;
 const LOCK_MS = 15 * 60_000;
@@ -76,7 +77,10 @@ export class AuthService {
     const tv = (enterprise as unknown as { tokenVersion?: number }).tokenVersion ?? 0;
     const payload = { sub: String(enterprise._id), tv };
     const { _id, ...safe } = enterprise.toObject() as unknown as Record<string, unknown> & { _id: unknown };
-    const accessToken = opts.expiresIn ? this.jwtService.sign(payload, { expiresIn: opts.expiresIn as any }) : this.jwtService.sign(payload);
+    // Sem prazo explícito = sessão do site: o lojista fica conectado (JWT_WEB_EXPIRES_IN, padrão 30 dias, renovada com o
+    // uso por SessionRenewInterceptor); admin segue com a sessão curta (JWT_EXPIRES_IN).
+    const expiresIn = opts.expiresIn ?? webSessionLife(this.config, { admin: enterprise.role === 'admin' });
+    const accessToken = this.jwtService.sign(payload, { expiresIn: expiresIn as any });
     const exp = (this.jwtService.decode(accessToken) as { exp?: number } | null)?.exp;
     const expiresAt = new Date(exp ? exp * 1000 : Date.now() + 8 * 3600_000);
     return { accessToken, expiresAt, enterprise: { id: String(_id), ...safe } };
@@ -112,7 +116,8 @@ export class AuthService {
     if (!h) return null;
     const e = await this.enterpriseService.findEnterpriseById(String(h.enterpriseId)).catch(() => null);
     if (!e || e.status === 'suspended') return null;
-    return { session: await this.login(e), path: h.path };
+    // Tela do app aberta no navegador embutido: sessão curta, sem os 30 dias do site.
+    return { session: await this.login(e, { expiresIn: this.config.get<string>('JWT_EXPIRES_IN') ?? '8h' }), path: h.path };
   }
 
   /** Resposta sempre igual: não revela se o e-mail existe. O link só chega por e-mail. */

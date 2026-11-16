@@ -41,7 +41,7 @@ describe('app do celular', () => {
     const r = await svc.redeemHandoff(code);
     expect(handoffs.findOneAndDelete).toHaveBeenCalledWith({ codeHash: sha(code), expiresAt: { $gt: expect.any(Date) } });
     expect(r?.path).toBe('/app/vendas');
-    expect(r?.session.accessToken).toBe('tok-default'); // sessão do navegador: validade normal
+    expect(r?.session.accessToken).toBe('tok-8h'); // tela do app no navegador: sessão curta (JWT_EXPIRES_IN), não os 30 dias do site
   });
 
   it('recusa código mal formado, vencido/usado ou de conta suspensa', async () => {
@@ -57,7 +57,7 @@ describe('app do celular', () => {
     const ctl = new AuthController(svc, {} as any, config as any, {} as any);
     const ok = res();
     await ctl.redeem('d'.repeat(64), ok);
-    expect(ok.cookie).toHaveBeenCalledWith('erp_session', 'tok-default', expect.objectContaining({ httpOnly: true }));
+    expect(ok.cookie).toHaveBeenCalledWith('erp_session', 'tok-8h', expect.objectContaining({ httpOnly: true }));
     expect(ok.redirect).toHaveBeenCalledWith(302, 'https://app.loja.com/app/vendas?embed=app');
     expect(ok.headers['Referrer-Policy']).toBe('no-referrer');
 

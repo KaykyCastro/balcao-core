@@ -36,6 +36,16 @@ export function baseOptions(config: Pick<ConfigService, 'get'>): CookieOptions {
   return { httpOnly: true, secure: prod || sameSite === 'none', sameSite, path: '/', ...(domain ? { domain } : {}) };
 }
 
+/**
+ * Quanto dura a sessão do site. Lojista: JWT_WEB_EXPIRES_IN (padrão 30 dias), renovada enquanto usa, então só cai
+ * depois de 30 dias sem abrir o painel (ou ao sair, trocar a senha, "sair de todos"). Admin e colaborador
+ * (computador da loja, muitas vezes compartilhado): JWT_EXPIRES_IN (padrão 8 h), também renovada com o uso.
+ */
+export function webSessionLife(config: Pick<ConfigService, 'get'>, who: { admin?: boolean; staff?: boolean }): string {
+  const short = config.get<string>('JWT_EXPIRES_IN') ?? '8h';
+  return who.admin || who.staff ? short : (config.get<string>('JWT_WEB_EXPIRES_IN') ?? '30d');
+}
+
 export function setSessionCookie(res: Response, config: Pick<ConfigService, 'get'>, token: string, expiresAt: Date) {
   res.cookie(SESSION_COOKIE, token, { ...baseOptions(config), expires: expiresAt });
 }
