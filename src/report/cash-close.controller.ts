@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { CurrentEnterprise } from '../common/decorators/current-enterprise.decorator';
@@ -23,6 +24,15 @@ class CloseDto {
   @IsOptional() @IsString() @MaxLength(300)
   note?: string;
 }
+/** Retirada de dinheiro da gaveta: valor, motivo e a senha do dono. */
+class WithdrawDto {
+  @IsInt() @Min(1) @Max(100_000_000)
+  amountCents: number;
+  @IsString() @MaxLength(200)
+  reason: string;
+  @IsString() @MaxLength(72)
+  ownerPassword: string;
+}
 type Req = { user: { staff?: StaffSession } };
 
 /** Fechamento de caixa: resumo do dia (hoje ou outro) e conferência do dinheiro da gaveta. */
@@ -39,6 +49,13 @@ export class CashCloseController {
   @Get('history')
   history(@CurrentEnterprise() eid: string, @Query() q: ListQuery, @Req() req: Req) {
     return this.svc.list(eid, q.limit, req.user.staff ?? null);
+  }
+
+  /** Retirar dinheiro da gaveta (sangria) hoje, com a senha do dono. Poucas tentativas por minuto. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('withdrawals') @HttpCode(200)
+  withdraw(@CurrentEnterprise() eid: string, @Body() dto: WithdrawDto, @Req() req: Req) {
+    return this.svc.withdraw(eid, dto, req.user.staff ?? null);
   }
 
   @Post()

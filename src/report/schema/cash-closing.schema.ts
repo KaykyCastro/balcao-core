@@ -19,8 +19,8 @@ export class CashClosing {
   @Prop({ type: String, default: '', maxlength: 300 }) note: string;
 
   /** Números do dia no momento do fechamento (vendas feitas depois aparecem no resumo, não aqui). */
-  @Prop(raw({ count: Number, revenueCents: Number, drawerTotalCents: Number, onlineCents: Number, fiadoSoldCents: Number, fiadoReceivedCents: Number, _id: false }))
-  totals: { count: number; revenueCents: number; drawerTotalCents: number; onlineCents: number; fiadoSoldCents: number; fiadoReceivedCents: number };
+  @Prop(raw({ count: Number, revenueCents: Number, drawerTotalCents: Number, onlineCents: Number, fiadoSoldCents: Number, fiadoReceivedCents: Number, withdrawnCents: Number, _id: false }))
+  totals: { count: number; revenueCents: number; drawerTotalCents: number; onlineCents: number; fiadoSoldCents: number; fiadoReceivedCents: number; withdrawnCents?: number };
 
   @Prop(raw({ name: String, staffId: { type: MongooseSchema.Types.ObjectId }, _id: false }))
   closedBy: { name: string; staffId?: Types.ObjectId | null };

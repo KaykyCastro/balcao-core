@@ -62,4 +62,10 @@ describe('fechamento de caixa', () => {
     expect(s.cash.expectedCents).toBe(2000 + 4000 - 1500);
     expect(s.exchanges).toEqual({ count: 2, returnedCents: 12000, refundCents: 1500, creditCents: 4000 });
   });
+
+  it('retirada (sangria) sai do esperado na gaveta, sem mudar o que entrou', () => {
+    const s = daySummary('2026-11-14', [sale({ paymentMethod: 'cash', totalCents: 10000 })], [{ method: 'cash', amountCents: 2000 }], 5000, [], [{ amountCents: 3000 }, { amountCents: 500 }]);
+    expect(s.cash).toMatchObject({ withdrawnCents: 3500, expectedCents: 5000 + 10000 + 2000 - 3500 });
+    expect(s.drawerTotalCents).toBe(12000);
+  });
 });

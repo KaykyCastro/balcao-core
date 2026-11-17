@@ -1,5 +1,5 @@
 import { StorageService } from '../storage/storage.service';
-import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, HttpStatus, Injectable, Logger, NotFoundException, Optional, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
@@ -151,6 +151,23 @@ export class EnterpriseService {
       { _id: id },
       { $set: { password: await bcrypt.hash(newPassword, BCRYPT_COST), passwordResetHash: null, passwordResetExpires: null }, $inc: { tokenVersion: 1 } },
     );
+  }
+
+  /**
+   * Confere a senha do dono para autorizar algo sensível no caixa (retirada de dinheiro). Usa a MESMA trava do login
+   * (5 erros → 15 min bloqueado), para a tela do caixa não virar um jeito de adivinhar a senha sem limite.
+   */
+  async verifyOwnerPassword(id: string, password: string): Promise<void> {
+    const e = await this.enterpriseModel.findById(id).select('+password +lockUntil +failedLogins');
+    if (!e) throw new NotFoundException('Empresa não encontrada');
+    if (e.lockUntil && e.lockUntil > new Date()) {
+      throw new HttpException({ statusCode: 429, code: 'LOGIN_LOCKED', message: 'Muitas tentativas com a senha do dono. Tente de novo em alguns minutos.' }, HttpStatus.TOO_MANY_REQUESTS);
+    }
+    if (typeof password !== 'string' || !password || password.length > 72 || !(await bcrypt.compare(password, e.password))) {
+      await this.registerLoginFailure(id, 5, 15 * 60_000);
+      throw new ForbiddenException({ statusCode: 403, code: 'OWNER_PASSWORD_WRONG', message: 'Senha do dono incorreta. (Conta criada pelo Google? Defina uma senha em "Esqueci a senha" na tela de entrar.)' });
+    }
+    if ((e.failedLogins ?? 0) > 0) await this.enterpriseModel.updateOne({ _id: id }, { $set: { failedLogins: 0 } });
   }
 
   async revokeAllSessions(id: string): Promise<void> {
