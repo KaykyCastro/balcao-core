@@ -96,7 +96,11 @@ export class StorageService {
     const up = await this.uploads.findById(id);
     if (!up || !may(up.enterpriseId ? String(up.enterpriseId) : null)) throw new NotFoundException('Envio não encontrado');
     if (up.status !== 'pending') return this.present(up);
+    // Envio lento: o app/site desiste em 90 s e mostra "o servidor demorou". Fica no log para o suporte comparar.
+    const t0 = Date.now();
+    const slow = () => { const ms = Date.now() - t0; if (ms > 8000) this.log.warn(`Envio lento: ${up.kind} de ${Math.round(up.size / 1024)} KB levou ${(ms / 1000).toFixed(1)} s para conferir e tratar (empresa ${String(up.enterpriseId ?? 'plataforma')})`); };
     const reject = async (message: string) => {
+      slow();
       await this.driver.remove([up.key]).catch(() => {});
       await up.deleteOne();
       throw new UnprocessableEntityException({ statusCode: 422, code: 'FILE_REJECTED', message });
@@ -118,6 +122,7 @@ export class StorageService {
     }
     up.status = isVideoKind(up.kind as UploadKind) ? 'attached' : 'ready'; // vídeo vai para a biblioteca da loja
     await up.save();
+    slow();
     return this.present(up);
   }
 
