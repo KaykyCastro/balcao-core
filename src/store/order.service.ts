@@ -32,6 +32,8 @@ import { escapeRegex } from '../common/mongo';
 import { RewardsService } from './rewards.service';
 import { cashbackCents, creditToUse } from './rewards.rules';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
+import { feeCollectionOf, marketplaceFeeFor } from './mp-token.rules';
+import { MpPollService } from './mp-poll.service';
 
 const SCOPE = 'store-order';
 const fmt = (c: number) => (c / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -60,6 +62,7 @@ export class OrderService {
     private readonly customers: CustomerService,
     private readonly shoppers: ShopperService,
     private readonly rewards: RewardsService,
+    private readonly polls?: MpPollService,
   ) {}
 
   /** Valor dos produtos que o cliente realmente pagou (subtotal menos cupom e crédito de cashback). */
@@ -211,7 +214,7 @@ export class OrderService {
           shopperId: shopper?._id ?? null, customerId: customer?._id ?? null,
           consent: { acceptedAt: now, termsVersion: dto.termsVersion ?? '', ip: ip.slice(0, 64) }, emailVerified: emailOk,
           notes: dto.notes?.trim() ?? '', provider: 'mercadopago', payeeId: store.mp.userId, accessHash: sha256(token),
-          source, feeRateBps, feeCents: waived ? 0 : onlineFeeCents(goodsCents, feeRateBps), feeCharged: false,
+          source, feeRateBps, feeCents: waived ? 0 : onlineFeeCents(goodsCents, feeRateBps), feeCharged: false, feeCollection: feeCollectionOf(store.mp?.mode),
           expiresAt: new Date(now.getTime() + (cod ? 30 * 86_400_000 : PAYMENT_WINDOW_MIN * 60_000)), history: [{ status, at: now }], seen: !cod,
           payment: { checkoutUrl: null, preferenceId: null, paymentId: null, method: null, paidAmountCents: null, paidAt: null, refundedAt: null, mode: cod ? 'on_delivery' : 'online', onDelivery: cod ? { method: cod.method, changeForCents: cod.method === 'cash' ? cod.changeForCents ?? null : null } : null },
         }], { session });
@@ -234,7 +237,8 @@ export class OrderService {
       const oid = String(order._id);
       const accessToken = await this.stores.mpAccessToken(store._id);
       const pref = await this.mp.createPreference({
-        accessToken, orderId: oid, marketplaceFeeCents: order.feeCents, expiresAt: order.expiresAt, statementDescriptor: store.name,
+        // Modo token: sem marketplace_fee (só existe no OAuth); a taxa vai para a fatura quando o pagamento é confirmado.
+        accessToken, orderId: oid, marketplaceFeeCents: marketplaceFeeFor(order.feeCollection ?? 'split', order.feeCents), expiresAt: order.expiresAt, statementDescriptor: store.name,
         // Com cupom ou cashback, vai uma linha só com o total (o Mercado Pago não aceita item negativo de desconto).
         items: order.totalCents !== order.subtotalCents + order.shipping.priceCents
           ? [{ title: `Pedido #${order.number} - ${store.name}`, quantity: 1, unitCents: order.totalCents }]
@@ -249,6 +253,8 @@ export class OrderService {
       });
       const link = `${storeUrl(this.front, store)}/pedido/${oid}?t=${token}`;
       await this.orders.updateOne({ _id: order._id }, { $set: { 'payment.checkoutUrl': pref.initPoint, 'payment.preferenceId': pref.id, linkSealed: seal(link) } });
+      // Modo token: os avisos não chegam sozinhos ao Balcão; a ordem entra na consulta automática (30 min).
+      if (order.feeCollection === 'invoice') await this.polls?.track('order', order._id, order.enterpriseId, new Date()).catch(() => undefined);
       void this.mail.send(order.customer.email, `Pedido #${order.number} recebido - ${store.name}`,
         `Olá, ${order.customer.name.split(' ')[0]}! Seu pedido #${order.number} na ${store.name} foi criado.\n\n${order.items.map((i) => `- ${i.quantity}x ${lineName(i.productName, i.options, i.note)} (${fmt(i.totalCents)})`).join('\n')}\nTotal: ${fmt(order.totalCents)}\n\nSe ainda não pagou, pague por aqui (vale por 1 hora): ${pref.initPoint}\nAcompanhe o pedido: ${link}\n\nGuarde este e-mail: o link acima é o acesso ao seu pedido, sem precisar de cadastro.`).catch(() => undefined);
       return { orderId: oid, number: order.number, token, checkoutUrl: pref.initPoint, totalCents: order.totalCents };
@@ -303,6 +309,16 @@ export class OrderService {
     return { received: true, outcome };
   }
 
+  /**
+   * Consulta automática (modo token): confere a ordem de Checkout Pro do pedido no Mercado Pago. Pedido que já saiu
+   * da espera do pagamento (pago, cancelado) ou sem ordem: nada a consultar ('gone').
+   */
+  async pollOnce(id: Types.ObjectId | string): Promise<string> {
+    const o = await crossTenant(this.orders, 'consulta automática: pedido da fila de consultas').findById(id);
+    if (!o || !o.payment?.preferenceId || !['pending_payment', 'expired'].includes(o.status)) return 'gone';
+    return this.syncPayment(o, o.payment.preferenceId);
+  }
+
   /** Lê o pagamento no Mercado Pago e aplica: aprovado vira venda; estornado depois de pago cancela o pedido. */
   /** Público para o webhook único de ordens (mp-orders-webhook.service.ts). */
   async syncPayment(o: OrderDocument, paymentId: string): Promise<string> {
@@ -341,7 +357,7 @@ export class OrderService {
         await session.endSession();
       }
     }
-    if (o.saleId) await this.billing.reverseCollectedFee(o.saleId).catch(() => undefined);
+    if (o.saleId) await this.billing.reverseOnlineFee(String(o.enterpriseId), o.saleId).catch(() => undefined);
   }
 
   /**
@@ -374,7 +390,8 @@ export class OrderService {
         }
         // Pago depois de expirar: o crédito usado tinha voltado para o cliente, então é usado de novo.
         if (o.stockReleased) await this.rewards.respendIfNeeded(o.shopperId, eid, o._id, o.discount?.creditCents ?? 0, session);
-        const sale = await this.sales.recordOnlineSale(eid, { orderId: o._id, items: o.items, totalCents: this.goodsOf(o), rateBps: o.feeRateBps ?? 0, collectedFeeCents: info.feeCents, customerId: o.customerId ?? null }, session);
+        // Taxa: 'split' = o Mercado Pago já separou (só registra); 'invoice' (modo token) = entra na fatura do mês.
+        const sale = await this.sales.recordOnlineSale(eid, { orderId: o._id, items: o.items, totalCents: this.goodsOf(o), rateBps: o.feeRateBps ?? 0, collectedFeeCents: info.feeCents, feeCollection: o.feeCollection ?? 'split', customerId: o.customerId ?? null }, session);
         await this.giveCashback(o, eid, session);
         // Compra protegida: a loja tem um prazo para enviar (pedido na mesa fica de fora).
         const mode = o.mode ?? 'ecommerce'; const shipBy = shipByOf(o.shipping.kind, now, mode);
@@ -584,7 +601,7 @@ export class OrderService {
       } finally {
         await session.endSession();
       }
-      if (refunded && o.saleId) await this.billing.reverseCollectedFee(o.saleId).catch(() => undefined);
+      if (refunded && o.saleId) await this.billing.reverseOnlineFee(String(o.enterpriseId), o.saleId).catch(() => undefined);
     }
     return this.present((await this.orders.findById(o._id))!);
   }

@@ -14,8 +14,9 @@ export class PosConfig {
   }))
   pix: { mode: 'off' | 'key' | 'mercadopago'; keyType: 'cpf' | 'cnpj' | 'email' | 'phone' | 'random'; key: string; holder: string; city: string };
 
-  @Prop(raw({ enabled: { type: Boolean, default: false }, terminalId: { type: String, default: '' }, label: { type: String, default: '' } }))
-  point: { enabled: boolean; terminalId: string; label: string };
+  /** Maquininha Point. `mpStoreId`/`mpPosId`: loja e caixa criados no Mercado Pago pelo assistente (vazios = criados lá). */
+  @Prop(raw({ enabled: { type: Boolean, default: false }, terminalId: { type: String, default: '' }, label: { type: String, default: '' }, mpStoreId: { type: String, default: '' }, mpPosId: { type: String, default: '' } }))
+  point: { enabled: boolean; terminalId: string; label: string; mpStoreId?: string; mpPosId?: string };
 
   @Prop(raw({
     enabled: { type: Boolean, default: false }, serial: { type: String, default: '' },

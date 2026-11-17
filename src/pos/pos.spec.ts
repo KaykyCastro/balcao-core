@@ -68,7 +68,7 @@ function setup(cfg: any = {}) {
     create: jest.fn(async (_e: string, dto: any, key: string, payment: any) => ({ _id: new Types.ObjectId(), totalCents: 4590, paymentMethod: dto.paymentMethod, key, payment })),
     findById: jest.fn(async () => ({ _id: 'sale', totalCents: 4590 })),
   };
-  const stores: any = { getOrCreate: jest.fn(async () => ({ _id: new Types.ObjectId(), mp: { userId: '555', nickname: 'LOJA' } })), mpAccessToken: jest.fn(async () => 'APP_USR-x') };
+  const stores: any = { getOrCreate: jest.fn(async () => ({ _id: new Types.ObjectId(), mp: { userId: '555', nickname: 'LOJA' } })), mpAccessToken: jest.fn(async () => 'APP_USR-x'), mpMode: jest.fn(async () => 'oauth') };
   const enterprises: any = { findEnterpriseById: jest.fn(async () => ({ name: 'Padaria Boa' })) };
   const customers: any = { getCustomerById: jest.fn(async () => ({})) };
   const stone: any = { partnerReady: false };

@@ -214,6 +214,12 @@ export class SlugQueryDto {
   @IsString() @MaxLength(60) slug: string;
 }
 
+/** Credenciais de produção coladas pelo lojista (modo token). O formato fino é conferido em mp-token.rules.ts. */
+export class MpTokenDto {
+  @IsString() @MaxLength(300) accessToken: string;
+  @IsString() @MaxLength(200) publicKey: string;
+}
+
 export class MpCallbackDto {
   @IsString() @MaxLength(300) @Matches(/^[\w.-]+$/) code: string;
   @IsString() @MaxLength(200) @Matches(/^[\w.-]+$/) state: string;

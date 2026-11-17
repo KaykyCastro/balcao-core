@@ -341,6 +341,17 @@ export class StorefrontController {
     return this.ordersHook.handle(q, (body ?? {}) as Record<string, any>, { signature, requestId });
   }
 
+  /**
+   * Avisos de uma loja conectada por credencial (modo token): o lojista cadastra esta URL (com a assinatura da loja) no
+   * painel da aplicação dele. Nada do corpo é confiado: a ordem é sempre consultada com o token da loja.
+   */
+  @SkipThrottle()
+  @Post('mercadopago/webhook/loja/:storeId')
+  @HttpCode(200)
+  storeOrdersWebhook(@Param('storeId') storeId: string, @Query() q: Record<string, unknown>, @Body() body: Record<string, unknown> | undefined) {
+    return this.ordersHook.handleStore(storeId, q, (body ?? {}) as Record<string, any>);
+  }
+
   /** Webhook do Mercado Pago para pedidos da loja online (token por pedido na URL + consulta do pagamento). */
   @SkipThrottle()
   @Post('store-webhook/mercadopago')

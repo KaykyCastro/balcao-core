@@ -127,10 +127,25 @@ export function orderAsPayment(r: Record<string, any>): MpPayment {
   };
 }
 
+/** O Mercado Pago recusou o token (401): expirou, foi revogado ou trocado. */
+export class MpAuthError extends BadGatewayException {}
+
 @Injectable()
 export class MercadoPagoClient {
   private readonly logger = new Logger(MercadoPagoClient.name);
   constructor(private readonly config: ConfigService) {}
+
+  /**
+   * Quem quer saber quando um token é recusado (401). A loja em modo token usa isso para se marcar como inválida e
+   * avisar o lojista, sem que cada ponto que fala com o Mercado Pago precise tratar. Nunca recebe o token em log.
+   */
+  private readonly authListeners: ((token: string) => void)[] = [];
+  onAuthError(fn: (token: string) => void) { this.authListeners.push(fn); }
+  private authFailed(token: string | undefined, path: string): never {
+    if (token) for (const fn of this.authListeners) { try { fn(token); } catch { /* aviso nunca derruba a chamada */ } }
+    this.logger.warn(`Mercado Pago recusou o token (401) em ${path}`);
+    throw new MpAuthError('A conexão com o Mercado Pago não vale mais. Conecte a conta de novo em Loja online → Pagamento.');
+  }
 
   /** Token da conta do Balcão (recebe as faturas do sistema e é a dona da aplicação de marketplace). */
   get platformToken(): string {
@@ -185,7 +200,7 @@ export class MercadoPagoClient {
     const json = (await res.json().catch(() => ({}))) as T & { message?: string; error?: string };
     if (!res.ok) {
       this.logger.error(`Mercado Pago ${res.status} em ${path}: ${JSON.stringify(json).slice(0, 400)}`);
-      if (res.status === 401) throw new BadGatewayException('A conexão com o Mercado Pago expirou. Conecte a conta de novo em Loja online → Pagamento.');
+      if (res.status === 401) this.authFailed(token, path);
       throw new BadGatewayException(`O Mercado Pago recusou a requisição (${res.status})`);
     }
     return json;
@@ -222,7 +237,7 @@ export class MercadoPagoClient {
   }
 
   async me(accessToken: string): Promise<{ id: string; nickname: string; email: string }> {
-    const r = await this.sdk('/users/me', () => new MpUserClient(this.sdkConfig(accessToken)).get() as Promise<unknown>) as Record<string, unknown>;
+    const r = await this.sdk('/users/me', () => new MpUserClient(this.sdkConfig(accessToken)).get() as Promise<unknown>, accessToken) as Record<string, unknown>;
     return { id: String(r.id ?? ''), nickname: String(r.nickname ?? ''), email: String(r.email ?? '') };
   }
 
@@ -239,14 +254,14 @@ export class MercadoPagoClient {
   private sdkOrders(accessToken: string) { return new MpOrderClient(this.sdkConfig(accessToken)); }
   /** Cria qualquer ordem (Pix, maquininha) pelo SDK, com a chave de idempotência de quem chamou. */
   private orderCreate(body: Record<string, unknown>, accessToken: string, idem: string) {
-    return this.sdk('/v1/orders', () => this.sdkOrders(accessToken).create({ body: body as never, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>) as Promise<Record<string, any>>;
+    return this.sdk('/v1/orders', () => this.sdkOrders(accessToken).create({ body: body as never, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>, accessToken) as Promise<Record<string, any>>;
   }
-  private async sdk<T>(path: string, run: () => Promise<T>): Promise<T> {
+  private async sdk<T>(path: string, run: () => Promise<T>, token?: string): Promise<T> {
     try { return await run(); }
     catch (e) {
       if (e instanceof MercadoPagoError) {
         this.logger.error(`Mercado Pago ${e.status} em ${path}: ${String(e.message).slice(0, 300)} ${JSON.stringify((e as { causes?: unknown }).causes ?? []).slice(0, 900)}`);
-        if (e.status === 401) throw new BadGatewayException('A conexão com o Mercado Pago expirou. Conecte a conta de novo em Loja online → Pagamento.');
+        if (e.status === 401) this.authFailed(token, path);
         throw new BadGatewayException(`O Mercado Pago recusou a requisição (${e.status}): ${JSON.stringify((e as { causes?: unknown }).causes ?? []).slice(0, 600)}`);
       }
       this.logger.error(`Mercado Pago sem resposta (${path}): ${(e as Error).message}`);
@@ -307,7 +322,7 @@ export class MercadoPagoClient {
     };
     const idem = p.idem ?? `pref-${p.orderId}`;
     let r: Record<string, unknown>;
-    const create = (body: Record<string, unknown>, key: string) => this.sdk('/v1/orders', () => this.sdkOrders(p.accessToken).create({ body: body as never, requestOptions: { idempotencyKey: key } }) as Promise<unknown>) as Promise<Record<string, unknown>>;
+    const create = (body: Record<string, unknown>, key: string) => this.sdk('/v1/orders', () => this.sdkOrders(p.accessToken).create({ body: body as never, requestOptions: { idempotencyKey: key } }) as Promise<unknown>, p.accessToken) as Promise<Record<string, unknown>>;
     const refused = (e: unknown) => e instanceof BadGatewayException && /\((400|422)\)/.test(e.message);
     try { r = await create(full, idem); }
     catch (e) {
@@ -331,7 +346,7 @@ export class MercadoPagoClient {
    */
   async cancelCheckoutOrder(orderId: string, accessToken: string): Promise<boolean> {
     if (!isOrderId(orderId)) return false;
-    try { await this.sdk(`/v1/orders/${orderId}/cancel`, () => this.sdkOrders(accessToken).cancel({ id: orderId }) as Promise<unknown>); return true; }
+    try { await this.sdk(`/v1/orders/${orderId}/cancel`, () => this.sdkOrders(accessToken).cancel({ id: orderId }) as Promise<unknown>, accessToken); return true; }
     catch (e) { this.logger.warn(`Não deu para cancelar a ordem ${orderId}: ${(e as Error).message}`); return false; }
   }
 
@@ -367,9 +382,9 @@ export class MercadoPagoClient {
 
   /** Consulta o pagamento direto no Mercado Pago (fonte da verdade; nunca confie no webhook ou no redirecionamento). */
   async payment(id: string, accessToken: string): Promise<MpPayment> {
-    if (isOrderId(id)) return orderAsPayment(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>) as Record<string, any>);
+    if (isOrderId(id)) return orderAsPayment(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>, accessToken) as Record<string, any>);
     // Pagamento (número, avisos "payment" e cobranças antigas): também pelo SDK oficial.
-    const r = await this.sdk(`/v1/payments/${id}`, () => new MpPaymentClient(this.sdkConfig(accessToken)).get({ id }) as Promise<unknown>) as Record<string, any>;
+    const r = await this.sdk(`/v1/payments/${id}`, () => new MpPaymentClient(this.sdkConfig(accessToken)).get({ id }) as Promise<unknown>, accessToken) as Record<string, any>;
     const fee = Array.isArray(r.fee_details) ? r.fee_details.filter((f: any) => f?.type === 'application_fee').reduce((s: number, f: any) => s + cents(f.amount), 0) : 0;
     return {
       id: String(r.id), status: String(r.status ?? ''), statusDetail: String(r.status_detail ?? ''), externalReference: r.external_reference ? String(r.external_reference) : null,
@@ -380,8 +395,8 @@ export class MercadoPagoClient {
 
   /** Devolve o pagamento inteiro ao comprador (a comissão do marketplace volta junto). */
   async refund(paymentId: string, accessToken: string, idem: string): Promise<void> {
-    if (isOrderId(paymentId)) { await this.sdk(`/v1/orders/${paymentId}/refund`, () => this.sdkOrders(accessToken).refund({ id: paymentId, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>); return; }
-    await this.sdk(`/v1/payments/${paymentId}/refunds`, () => new MpRefundClient(this.sdkConfig(accessToken)).create({ payment_id: paymentId, body: {}, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>);
+    if (isOrderId(paymentId)) { await this.sdk(`/v1/orders/${paymentId}/refund`, () => this.sdkOrders(accessToken).refund({ id: paymentId, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>, accessToken); return; }
+    await this.sdk(`/v1/payments/${paymentId}/refunds`, () => new MpRefundClient(this.sdkConfig(accessToken)).create({ payment_id: paymentId, body: {}, requestOptions: { idempotencyKey: idem } }) as Promise<unknown>, accessToken);
   }
 
   // ------------------------------------------------------------------ balcão: maquininha Point e Pix (API de Orders)
@@ -390,6 +405,24 @@ export class MercadoPagoClient {
   async terminals(accessToken: string): Promise<MpTerminal[]> {
     const r = await this.call<{ data?: { terminals?: Record<string, any>[] } }>('GET', '/terminals/v1/list?limit=50', undefined, accessToken);
     return (r.data?.terminals ?? []).map((t) => ({ id: String(t.id), posId: t.pos_id != null ? String(t.pos_id) : null, storeId: t.store_id != null ? String(t.store_id) : null, operatingMode: String(t.operating_mode ?? '') }));
+  }
+
+  /**
+   * Loja física no Mercado Pago (POST /users/{user_id}/stores). A localização precisa ser a real (cidade, estado,
+   * latitude e longitude): o Mercado Pago usa nos cálculos de imposto. `externalId` torna a criação reconhecível.
+   */
+  async createMpStore(accessToken: string, userId: string, p: { name: string; externalId: string; street: string; number: string; city: string; state: string; latitude: number; longitude: number; reference?: string }): Promise<{ id: string }> {
+    const r = await this.call<Record<string, any>>('POST', `/users/${encodeURIComponent(userId)}/stores`, {
+      name: p.name.slice(0, 60), external_id: p.externalId.slice(0, 60),
+      location: { street_number: p.number, street_name: p.street, city_name: p.city, state_name: p.state, latitude: p.latitude, longitude: p.longitude, ...(p.reference ? { reference: p.reference.slice(0, 80) } : {}) },
+    }, accessToken);
+    return { id: String(r.id ?? '') };
+  }
+
+  /** Caixa (ponto de venda) na loja do Mercado Pago (POST /v2/pos). Cada caixa aceita UMA maquininha. */
+  async createMpPos(accessToken: string, p: { storeId: string; name: string; externalId: string }): Promise<{ id: string }> {
+    const r = await this.call<Record<string, any>>('POST', '/v2/pos', { name: p.name.replace(/[^\w -]/g, '').trim().slice(0, 45) || 'Caixa Balcao', store_id: p.storeId, external_id: p.externalId.slice(0, 40) }, accessToken, `pos-${p.externalId}`);
+    return { id: String(r.id ?? '') };
   }
 
   /** Coloca a maquininha no modo PDV (recebe as cobranças do sistema). Depois é preciso reiniciar a maquininha. */
@@ -429,7 +462,7 @@ export class MercadoPagoClient {
   }
 
   async order(accessToken: string, id: string): Promise<MpOrder> {
-    return mpOrder(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>) as Record<string, any>);
+    return mpOrder(await this.sdk(`/v1/orders/${id}`, () => this.sdkOrders(accessToken).get({ id }) as Promise<unknown>, accessToken) as Record<string, any>);
   }
 
   /** Cancela a cobrança. Já na maquininha (at_terminal) o cancelamento é pedido e confirmado depois. */

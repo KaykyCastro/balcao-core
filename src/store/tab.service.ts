@@ -19,6 +19,7 @@ import { MercadoPagoClient } from '../mercadopago/mercadopago.client';
 import { randomToken, sha256, sign, verifySigned } from '../common/secret-box';
 import { toCents } from '../common/money';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
+import { MpPollService } from './mp-poll.service';
 
 const SCOPE = 'store-tab';
 const MAX_OPEN_PER_TABLE = 12;
@@ -55,6 +56,7 @@ export class TabService {
     private readonly mp: MercadoPagoClient,
     private readonly config: ConfigService,
     private readonly staff: StaffService,
+    private readonly polls?: MpPollService,
   ) {}
 
   /** Garçom que mexe numa conta sem dono passa a ser o responsável por ela. */
@@ -332,7 +334,16 @@ export class TabService {
       expiresAt: new Date(Date.now() + 60 * 60_000),
     });
     await this.tabs.updateOne({ _id: tab._id, status: 'open', 'payment.released': true }, { $set: { 'payment.checkoutUrl': pref.initPoint, 'payment.preferenceId': pref.id } });
+    // Modo token: os avisos não chegam sozinhos ao Balcão; a conta entra na consulta automática (30 min).
+    if (store.mp?.mode === 'token') await this.polls?.track('tab', tab._id, tab.enterpriseId, new Date()).catch(() => undefined);
     return { checkoutUrl: pref.initPoint };
+  }
+
+  /** Consulta automática (modo token): confere a ordem do pagamento pelo celular. Conta já fechada ou sem ordem: 'gone'. */
+  async pollOnce(id: Types.ObjectId | string): Promise<string> {
+    const tab = await crossTenant(this.tabs, 'consulta automática: comanda da fila de consultas').findById(id);
+    if (!tab || tab.status !== 'open' || !tab.payment?.preferenceId) return 'gone';
+    return this.syncPayment(tab, tab.payment.preferenceId);
   }
 
   async webhook(q: Record<string, unknown>, body: Record<string, any>, headers: { signature?: string; requestId?: string }) {

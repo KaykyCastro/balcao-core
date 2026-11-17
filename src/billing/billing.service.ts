@@ -96,6 +96,20 @@ export class BillingService {
     await this.feeModel.updateOne({ saleId, collected: true, reversedAt: null }, { $set: { reversedAt: new Date() } });
   }
 
+  /**
+   * Pagamento online devolvido ao comprador, em qualquer modo da conta Mercado Pago:
+   * - taxa separada pelo Mercado Pago (OAuth): voltou junto no estorno, só marca;
+   * - taxa lançada na fatura (modo token): estorna se ainda não foi faturada (a dívida diminui), igual a uma venda
+   *   cancelada. Já faturada: fica (o mesmo tratamento das demais taxas faturadas).
+   * Idempotente: cada lançamento só é estornado uma vez (filtro reversedAt: null).
+   */
+  async reverseOnlineFee(enterpriseId: string, saleId: Types.ObjectId): Promise<void> {
+    await this.reverseCollectedFee(saleId);
+    const session = await this.connection.startSession();
+    try { await session.withTransaction(async () => { await this.reverseFee(enterpriseId, saleId, session); }); }
+    finally { await session.endSession(); }
+  }
+
   /** Percentual da loja online conforme a origem do cliente. */
   async onlineRate(source: 'store' | 'directory'): Promise<number> {
     const p = await this.settings.policy();

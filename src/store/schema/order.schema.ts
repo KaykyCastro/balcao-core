@@ -132,6 +132,15 @@ export class Order {
   feeCharged: boolean;
 
   /**
+   * Como a taxa da loja online é recebida, decidido na criação do pedido pelo modo da conta Mercado Pago:
+   * 'split' (OAuth: marketplace_fee, o Mercado Pago separa no pagamento) ou 'invoice' (modo token: sem
+   * marketplace_fee, a taxa entra na fatura mensal e é estornada se o pedido for cancelado/devolvido antes de faturar).
+   * Pedidos antigos não têm o campo e contam como 'split'.
+   */
+  @Prop({ type: String, enum: ['split', 'invoice'], default: 'split' })
+  feeCollection: 'split' | 'invoice';
+
+  /**
    * Compra protegida: prazo para a loja enviar, confirmação de recebimento pelo comprador e reclamação.
    * active = esperando entrega; confirmed = comprador recebeu (ou prazo passou sem queixa); disputed = reclamação aberta; refunded = devolvido.
    */

@@ -4,7 +4,9 @@ import { StorageService } from '../storage/storage.service';
 import { removedUrls } from '../storage/storage.rules';
 import { CodeService } from './code/code.service';
 import { pageMedia, pageUrls, sanitizePage, type SitePage } from './builder.rules';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { checkTokenInput, type MpMode } from './mp-token.rules';
+import { MessagesService } from '../messages/messages.service';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Store, StoreDocument } from './schema/store.schema';
@@ -39,6 +41,8 @@ const LOOK_ONLY = ['theme', 'tagline', 'about', 'logo', 'banner', 'notice', 'sli
  */
 export const pkceVerifier = (state: string) => sign('mp-pkce-a', state) + sign('mp-pkce-b', state);
 export const pkceChallenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
+/** Hash do token (modo token): liga um 401 à loja sem precisar decifrar nada. Nunca exposto. */
+export const tokenHash = (token: string) => createHash('sha256').update(`mp-token:${token}`).digest('hex');
 
 @Injectable()
 export class StoreService {
@@ -52,7 +56,12 @@ export class StoreService {
     private readonly mp: MercadoPagoClient,
     private readonly storage: StorageService,
     private readonly code: CodeService = new CodeService(),
-  ) {}
+    private readonly messages?: MessagesService,
+  ) {
+    // Modo token: um 401 do Mercado Pago em qualquer chamada marca a conexão da loja como inválida (ver markTokenInvalid).
+    this.mp.onAuthError?.((token) => { void this.markTokenInvalid(token).catch(() => undefined); });
+  }
+  private readonly log = new Logger('StoreService');
 
   // ------------------------------------------------------------------ lojista
 
@@ -83,7 +92,11 @@ export class StoreService {
     const json = s.toJSON() as Record<string, any>;
     const me = { ...(json.shipping?.melhorEnvio ?? {}) };
     delete me.tokenSealed;
-    if (json.mp) { json.mp = { ...json.mp, connected: !!json.mp.userId }; delete json.mp.accessSealed; delete json.mp.refreshSealed; }
+    if (json.mp) {
+      const mode: MpMode = json.mp.mode === 'token' ? 'token' : 'oauth';
+      json.mp = { ...json.mp, mode, status: json.mp.status === 'invalid' ? 'invalid' : 'ok', connected: !!json.mp.userId, ...(mode === 'token' && json.mp.userId ? { webhookUrl: this.mpWebhookUrl(String(s._id)) } : {}) };
+      delete json.mp.accessSealed; delete json.mp.refreshSealed; delete json.mp.tokenHash;
+    }
     me.hasToken = !!withSecret?.shipping?.melhorEnvio?.tokenSealed;
     return { ...json, mode: modeOf(s), shipping: { ...json.shipping, melhorEnvio: me }, checklist: this.checklist(s, me.hasToken), fees: await this.fees(enterpriseId) } as unknown as Record<string, any> & { enabled: boolean; checklist: { payment: boolean; shipping: boolean; legal: boolean; whatsapp: boolean } };
   }
@@ -275,21 +288,89 @@ export class StoreService {
     await this.stores.updateOne({ _id: store._id }, { $set: { mp: {
       userId: t.userId || me.id, nickname: me.nickname, email: me.email, publicKey: t.publicKey,
       accessSealed: seal(t.accessToken), refreshSealed: seal(t.refreshToken), expiresAt: t.expiresAt, connectedAt: new Date(),
+      mode: 'oauth', status: 'ok', invalidAt: null, tokenHash: null,
     } } });
     return this.view(enterpriseId);
+  }
+
+  /**
+   * Conexão por credencial (modo token): o lojista cola o Access Token e a Public Key de PRODUÇÃO da aplicação dele.
+   * Confere o formato, recusa credencial de teste, entra no Mercado Pago com o token (/users/me) e só então guarda
+   * (token cifrado). Sem refresh: vale até ser trocado ou revogado. O token nunca volta na resposta nem vai para log.
+   */
+  async mpConnectToken(enterpriseId: string, input: { accessToken: string; publicKey: string }) {
+    const c = checkTokenInput(input);
+    if (!c.ok) throw new UnprocessableEntityException({ statusCode: 422, code: c.code, message: c.message });
+    const store = await this.getOrCreate(enterpriseId);
+    let me: { id: string; nickname: string; email: string };
+    try { me = await this.mp.me(c.accessToken); }
+    catch { throw new UnprocessableEntityException({ statusCode: 422, code: 'MP_TOKEN_REJECTED', message: 'O Mercado Pago não aceitou esse Access Token. Copie de novo o Access Token de produção da sua aplicação (sem espaços) e confira se a aplicação está ativa.' }); }
+    if (!/^\d{1,20}$/.test(me.id) || (c.userIdHint && c.userIdHint !== me.id)) {
+      throw new UnprocessableEntityException({ statusCode: 422, code: 'MP_TOKEN_REJECTED', message: 'Não conseguimos confirmar a conta desse Access Token. Copie de novo as credenciais de produção da sua aplicação.' });
+    }
+    // Uma conta do Mercado Pago recebe por uma loja só: os avisos e a conferência dos pagamentos são achados pela conta.
+    const other = await crossTenant(this.stores, 'conexão do Mercado Pago: a mesma conta já está em outra loja?').exists({ 'mp.userId': me.id, _id: { $ne: store._id } });
+    if (other) throw new ConflictException({ statusCode: 409, code: 'MP_ACCOUNT_IN_USE', message: 'Essa conta do Mercado Pago já está conectada em outra loja do Balcão.' });
+    await this.stores.updateOne({ _id: store._id }, { $set: { mp: {
+      userId: me.id, nickname: me.nickname, email: me.email, publicKey: c.publicKey,
+      accessSealed: seal(c.accessToken), refreshSealed: null, expiresAt: null, connectedAt: new Date(),
+      mode: 'token', status: 'ok', invalidAt: null, tokenHash: tokenHash(c.accessToken),
+    } } });
+    this.log.log(`Loja ${String(store._id)} conectou o Mercado Pago por credencial (conta ${me.id})`);
+    return this.view(enterpriseId);
+  }
+
+  /**
+   * Endereço de avisos da loja no modo token (o lojista cadastra no painel da aplicação dele, evento "Order"). Leva a
+   * assinatura da loja: quem não tem a URL não consegue mandar avisos em nome dela (e mesmo assim nada é confiado sem
+   * consultar o pagamento no Mercado Pago).
+   */
+  mpWebhookUrl(storeId: string): string {
+    const api = (process.env.APP_URL ?? '').replace(/\/+$/, '');
+    return `${api}/public/mercadopago/webhook/loja/${storeId}?s=${sign('mp-store-hook', storeId)}`;
+  }
+  static mpWebhookOk(storeId: string, s: unknown) { return /^[a-f0-9]{24}$/i.test(storeId) && verifySigned('mp-store-hook', storeId, s); }
+
+  /** 401 do Mercado Pago com o token de uma loja em modo token: marca inválida (sem apagar nada) e avisa o lojista uma vez. */
+  async markTokenInvalid(token: string) {
+    const s = await crossTenant(this.stores, 'Mercado Pago recusou um token: achar a loja pelo hash').findOneAndUpdate(
+      { 'mp.tokenHash': tokenHash(token), 'mp.mode': 'token', 'mp.status': { $ne: 'invalid' } },
+      { $set: { 'mp.status': 'invalid', 'mp.invalidAt': new Date() } }, { projection: { _id: 1, enterpriseId: 1 } },
+    ).lean();
+    if (!s) return;
+    this.log.warn(`Loja ${String(s._id)}: o Mercado Pago recusou o Access Token; conexão marcada como inválida`);
+    await this.messages?.notify(s.enterpriseId as never, {
+      title: 'Mercado Pago: cole um Access Token novo', level: 'warning', link: '/app/loja?aba=pagamento',
+      body: 'O Mercado Pago deixou de aceitar o Access Token que você colou (ele pode ter sido renovado ou a aplicação desativada). Enquanto isso, a loja online, o Pix e a maquininha pelo Mercado Pago não conseguem cobrar. Em Loja online → Pagamento, cole o Access Token de produção atual da sua aplicação.',
+    }).catch(() => undefined);
   }
 
   /** Desconecta. Com a loja no ar, ela é desligada (sem conta não há como receber). */
   async mpDisconnect(enterpriseId: string) {
     const store = await this.getOrCreate(enterpriseId);
-    await this.stores.updateOne({ _id: store._id }, { $set: { enabled: false, mp: { userId: '', nickname: '', email: '', publicKey: '', accessSealed: null, refreshSealed: null, expiresAt: null, connectedAt: null } } });
+    await this.stores.updateOne({ _id: store._id }, { $set: { enabled: false, mp: { userId: '', nickname: '', email: '', publicKey: '', accessSealed: null, refreshSealed: null, expiresAt: null, connectedAt: null, mode: 'oauth', status: 'ok', invalidAt: null, tokenHash: null } } });
     return this.view(enterpriseId);
   }
 
-  /** Token de acesso do lojista, renovado sozinho quando falta menos de 7 dias para vencer. */
+  /** Modo da conexão (lojas antigas, sem o campo, são 'oauth'). */
+  async mpMode(storeId: Types.ObjectId | string): Promise<MpMode | null> {
+    const s = await this.stores.findById(storeId).select('mp.userId mp.mode').lean();
+    return s?.mp?.userId ? (s.mp.mode === 'token' ? 'token' : 'oauth') : null;
+  }
+
+  /**
+   * Token de acesso do lojista. OAuth: renovado sozinho quando falta menos de 7 dias para vencer. Modo token: o que o
+   * lojista colou, nunca renovado; se o Mercado Pago já recusou (status inválido), avisa para colar um novo.
+   */
   async mpAccessToken(storeId: Types.ObjectId | string): Promise<string> {
     const s = await this.stores.findById(storeId).select('+mp.accessSealed +mp.refreshSealed').lean();
-    const access = open(s?.mp?.accessSealed), refresh = open(s?.mp?.refreshSealed);
+    const access = open(s?.mp?.accessSealed);
+    if (s?.mp?.mode === 'token') {
+      if (!access) throw new ConflictException('A loja não está conectada ao Mercado Pago');
+      if (s.mp.status === 'invalid') throw new ConflictException({ statusCode: 409, code: 'MP_TOKEN_INVALID', message: 'O Mercado Pago não aceita mais o Access Token desta loja. Cole um novo em Loja online → Pagamento.' });
+      return access;
+    }
+    const refresh = open(s?.mp?.refreshSealed);
     if (!s || !access || !refresh) throw new ConflictException('A loja não está conectada ao Mercado Pago');
     if (s.mp.expiresAt && new Date(s.mp.expiresAt).getTime() - Date.now() > 7 * 86_400_000) return access;
     const t = await this.mp.refresh(refresh);

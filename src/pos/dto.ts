@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsInt, IsMongoId, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsInt, IsMongoId, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
 import { SaleDiscountDto, SaleItemInputDto } from '../sale/dto/sale-create.dto';
 
 class PixConfigDto {
@@ -27,6 +27,23 @@ class TapConfigDto {
   /** CPF ou CNPJ da conta InfinitePay (opcional, confere a conta no retorno). */
   @IsOptional() @IsString() @Matches(/^[0-9./-]{0,20}$/, { message: 'Documento inválido' }) doc?: string;
 }
+/** Assistente da Point: loja e caixa no Mercado Pago. Endereço real (o Mercado Pago usa nos impostos). */
+export class PointStoreDto {
+  @IsString() @MaxLength(60) name: string;
+  @IsString() @MaxLength(120) street: string;
+  @IsString() @Matches(/^[0-9A-Za-z/ -]{1,10}$/, { message: 'Número inválido' }) number: string;
+  @IsString() @MaxLength(80) city: string;
+  @IsString() @MaxLength(40) state: string;
+  /** Latitude e longitude do endereço (formato decimal, ex.: -23.5505). */
+  @IsNumber() @Min(-34) @Max(6) latitude: number;
+  @IsNumber() @Min(-74) @Max(-28) longitude: number;
+  @IsOptional() @IsString() @MaxLength(80) reference?: string;
+}
+export class PointTerminalDto {
+  @IsString() @Matches(/^[A-Za-z0-9_-]{4,80}$/, { message: 'Maquininha inválida' }) terminalId: string;
+  @IsOptional() @IsString() @MaxLength(40) label?: string;
+}
+
 export class PosConfigDto {
   @IsOptional() @ValidateNested() @Type(() => PixConfigDto) pix?: PixConfigDto;
   @IsOptional() @ValidateNested() @Type(() => PointConfigDto) point?: PointConfigDto;

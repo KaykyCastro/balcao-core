@@ -236,10 +236,14 @@ export class SaleService {
    * Pedido online pago: registra a venda (estoque e promoção já foram reservados no pedido) e lança a taxa da loja online.
    * Roda dentro da transação do pedido. A taxa entra mesmo com a conta bloqueada: o cliente já pagou.
    */
-  async recordOnlineSale(enterpriseId: string, p: { orderId: Types.ObjectId; items: SaleItem[]; totalCents: number; rateBps: number; collectedFeeCents: number; customerId?: Types.ObjectId | null }, session: ClientSession): Promise<SaleDocument> {
+  async recordOnlineSale(enterpriseId: string, p: { orderId: Types.ObjectId; items: SaleItem[]; totalCents: number; rateBps: number; collectedFeeCents: number; feeCollection?: 'split' | 'invoice'; customerId?: Types.ObjectId | null }, session: ClientSession): Promise<SaleDocument> {
     const saleId = new Types.ObjectId();
-    // Taxa da loja online: o Mercado Pago já separou (marketplace_fee). Só registra; não entra na fatura nem no teto.
-    const feeCents = await this.billingService.recordCollectedFee(enterpriseId, saleId, p.totalCents, p.rateBps, p.collectedFeeCents, session);
+    // Taxa da loja online. OAuth ('split'): o Mercado Pago já separou (marketplace_fee); só registra, não entra na fatura
+    // nem no teto. Modo token ('invoice'): o Mercado Pago não separou nada, então vira dívida e entra na fatura do mês
+    // (como no pagar na entrega); cancelar/devolver antes de faturar estorna (SaleService.cancel → reverseFee).
+    const feeCents = p.feeCollection === 'invoice'
+      ? await this.billingService.recordUncollectedOnlineFee(enterpriseId, saleId, p.totalCents, p.rateBps, session)
+      : await this.billingService.recordCollectedFee(enterpriseId, saleId, p.totalCents, p.rateBps, p.collectedFeeCents, session);
     const [created] = await this.saleModel.create(
       [{ _id: saleId, enterpriseId, customerId: p.customerId ?? null, paymentMethod: 'online', channel: 'online', orderId: p.orderId, items: p.items, totalCents: p.totalCents, feeCents, cashReceivedCents: null, changeCents: null }],
       { session },

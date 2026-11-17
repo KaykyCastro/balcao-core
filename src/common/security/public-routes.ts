@@ -73,6 +73,7 @@ export const PUBLIC_ROUTES: readonly [method: string, path: string, why: string]
   ['GET', '/public/domains/allow', 'Caddy pergunta se pode emitir o HTTPS de um domínio (só domínios ativos de lojas)'],
   ['POST', '/public/mercadopago/webhook', 'avisos de ordens do Mercado Pago (assinatura conferida; a ordem é sempre reconsultada com o token da conta)'],
   ['POST', '/public/store-webhook/mercadopago', 'aviso do Mercado Pago (sempre reconsultado na API do MP)'],
+  ['POST', '/public/mercadopago/webhook/loja/:storeId', 'avisos de uma loja em modo token (URL assinada por loja; a ordem é sempre reconsultada com o token da loja)'],
   ['GET', '/public/store/:slug', 'vitrine pública (só dados que a loja publicou)'],
   ['POST', '/public/store/:slug/coupon-check', 'vitrine pública (só dados que a loja publicou)'],
   ['GET', '/public/store/:slug/coupons', 'vitrine pública (só dados que a loja publicou)'],

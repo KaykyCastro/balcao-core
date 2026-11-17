@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { PosConfig, PosPayment, PosPaymentDocument, type PosProvider } from './schema/pos.schema';
-import { PosChargeDto, PosConfigDto, TapResultDto } from './dto';
+import { PointStoreDto, PosChargeDto, PosConfigDto, TapResultDto } from './dto';
 import { randomBytes } from 'crypto';
 import { digits, docOk, HANDLE_RE, judgeTapResult, maxInstallments, normalizeHandle, returnUrlOk, tapDeeplink } from './tap.rules';
 import { StoneClient } from './stone.client';
@@ -16,9 +16,17 @@ import { open, seal } from '../common/secret-box';
 import { isDuplicateKeyError } from '../common/mongo';
 import { TabService } from '../store/tab.service';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
+import { MpPollService } from '../store/mp-poll.service';
+import { MpOrdersWebhookService } from '../store/mp-orders-webhook.service';
+import type { MpTerminal } from '../mercadopago/mercadopago.client';
 
 const MIN = 60_000;
 const TTL: Record<PosProvider, number> = { mp_point: 15 * MIN, stone: 15 * MIN, mp_pix: 30 * MIN, pix_key: 30 * MIN, infinitetap: 15 * MIN };
+/** Nome curto da maquininha: modelo + fim do número de série (o id vem como MODELO__SERIAL). */
+export function terminalLabel(t: Pick<MpTerminal, 'id'>): string {
+  const [model, serial] = t.id.split('__');
+  return serial ? `${model.replace(/_/g, ' ')} final ${serial.slice(-4)}` : t.id.slice(-12);
+}
 export const PROVIDER_LABEL: Record<PosProvider, string> = { mp_point: 'Maquininha Mercado Pago', stone: 'Maquininha Stone', mp_pix: 'Pix (Mercado Pago)', pix_key: 'Pix na chave da loja', infinitetap: 'Celular (InfiniteTap)' };
 
 /**
@@ -38,7 +46,12 @@ export class PosService {
     private readonly enterprises: EnterpriseService,
     private readonly customers: CustomerService,
     private readonly tabs: TabService,
-  ) {}
+    private readonly polls?: MpPollService,
+    hooks?: MpOrdersWebhookService,
+  ) {
+    // Aviso do Mercado Pago de uma cobrança do caixa (modo token, endereço da loja) chega aqui pelo webhook da loja.
+    hooks?.registerPos((eid, id) => this.syncById(eid, id));
+  }
 
   // ------------------------------------------------------------------ configuração
 
@@ -115,6 +128,68 @@ export class PosService {
     return this.mp.terminals(token);
   }
 
+  // ------------------------------------------------------------------ assistente da Point (OAuth ou modo token)
+  // Fluxo do Mercado Pago (docs mp-point/configure-terminal): loja + caixa na conta → a maquininha é ASSOCIADA ao caixa
+  // pelo app do Mercado Pago no celular (lendo o QR da maquininha; não há API para isso) → modo PDV → reiniciar.
+
+  /** Situação: maquininhas da conta (com loja/caixa e modo) e a escolhida no Balcão. */
+  async pointSetup(eid: string) {
+    const token = await this.mpToken(eid);
+    if (!token) throw new ConflictException({ statusCode: 409, code: 'MP_NOT_CONNECTED', message: 'Conecte a conta do Mercado Pago antes (Loja online → Pagamento).' });
+    const c = await this.cfg(eid);
+    const terminals = await this.mp.terminals(token);
+    return {
+      terminals: terminals.map((t) => ({ ...t, pdv: t.operatingMode.toUpperCase() === 'PDV', label: terminalLabel(t) })),
+      chosen: c.point?.terminalId ?? '', enabled: !!c.point?.enabled, mpStoreId: c.point?.mpStoreId ?? '', mpPosId: c.point?.mpPosId ?? '',
+      // Sem nenhuma maquininha na conta: falta associar pelo app do Mercado Pago (e, antes, ter loja e caixa).
+      notice: terminals.length ? null : { code: 'NO_TERMINALS', message: 'Nenhuma maquininha Point está associada a esta conta do Mercado Pago. Ligue a maquininha, escolha "Sou responsável pelo negócio" e leia o QR que aparece nela com o app do Mercado Pago (na conta conectada), escolhendo a loja e o caixa.' },
+    };
+  }
+
+  /**
+   * Cria a loja e o caixa no Mercado Pago (se ainda não existirem pelo Balcão). A associação da maquininha ao caixa é
+   * feita depois, no app do Mercado Pago. Idempotente: com loja e caixa já criados, só devolve os ids.
+   */
+  async pointCreateMpStore(eid: string, dto: PointStoreDto) {
+    const token = await this.mpToken(eid);
+    if (!token) throw new ConflictException({ statusCode: 409, code: 'MP_NOT_CONNECTED', message: 'Conecte a conta do Mercado Pago antes (Loja online → Pagamento).' });
+    const store = await this.stores.getOrCreate(eid);
+    const c = await this.cfg(eid);
+    let mpStoreId = c.point?.mpStoreId ?? '', mpPosId = c.point?.mpPosId ?? '';
+    const ext = `balcao${String(store._id).slice(-12)}`; // único por loja do Balcão, só letras e números
+    if (!mpStoreId) {
+      mpStoreId = (await this.mp.createMpStore(token, store.mp.userId, { name: dto.name.trim(), externalId: ext, street: dto.street.trim(), number: dto.number.trim(), city: dto.city.trim(), state: dto.state.trim(), latitude: dto.latitude, longitude: dto.longitude, reference: dto.reference?.trim() })).id;
+      await this.configs.updateOne({ enterpriseId: new Types.ObjectId(eid) }, { $set: { 'point.mpStoreId': mpStoreId } }, { upsert: true });
+    }
+    if (!mpPosId) {
+      mpPosId = (await this.mp.createMpPos(token, { storeId: mpStoreId, name: `Caixa ${dto.name}`, externalId: `${ext}pos1` })).id;
+      await this.configs.updateOne({ enterpriseId: new Types.ObjectId(eid) }, { $set: { 'point.mpPosId': mpPosId } }, { upsert: true });
+    }
+    return { mpStoreId, mpPosId };
+  }
+
+  /**
+   * Escolhe a maquininha: precisa estar associada a esta conta; se não estiver em modo PDV, pede ao Mercado Pago para
+   * mudar (a maquininha precisa ser reiniciada depois) e confere de novo. Salva o terminal e liga a Point no caixa.
+   */
+  async pointChoose(eid: string, terminalId: string, label?: string) {
+    const token = await this.mpToken(eid);
+    if (!token) throw new ConflictException({ statusCode: 409, code: 'MP_NOT_CONNECTED', message: 'Conecte a conta do Mercado Pago antes (Loja online → Pagamento).' });
+    let t = (await this.mp.terminals(token)).find((x) => x.id === terminalId);
+    if (!t) throw new NotFoundException({ statusCode: 404, code: 'TERMINAL_NOT_IN_ACCOUNT', message: 'Essa maquininha não está associada a esta conta do Mercado Pago. Associe pelo app do Mercado Pago e tente de novo.' });
+    let restart = false;
+    if (t.operatingMode.toUpperCase() !== 'PDV') {
+      await this.mp.setPdvMode(token, terminalId);
+      restart = true;
+      t = (await this.mp.terminals(token)).find((x) => x.id === terminalId) ?? t;
+    }
+    await this.configs.updateOne({ enterpriseId: new Types.ObjectId(eid) }, { $set: { 'point.terminalId': terminalId, 'point.enabled': true, 'point.label': (label?.trim() || terminalLabel(t)).slice(0, 40) } }, { upsert: true });
+    return {
+      terminalId, pdv: t.operatingMode.toUpperCase() === 'PDV', restart,
+      message: restart ? 'Pronto. Agora reinicie a maquininha e confira em Mais opções → Configurações → Modo de vinculação: deve aparecer "Ponto de Venda (PDV)".' : 'Maquininha pronta para receber as cobranças do caixa.',
+    };
+  }
+
   async setPdv(eid: string, terminalId: string) {
     const token = await this.mpToken(eid);
     if (!token) throw new ConflictException('Conecte a conta do Mercado Pago antes (Loja online → Pagamento)');
@@ -158,7 +233,9 @@ export class PosService {
       } else {
         if (!c.point?.enabled || !c.point.terminalId) throw new ConflictException('Escolha a maquininha Point em Configurações → Pagamentos no balcão');
         const type = dto.method === 'credit' ? 'credit_card' : dto.method === 'debit' ? 'debit_card' : 'qr';
-        const o = await this.mp.createPointOrder({ accessToken: token, terminalId: c.point.terminalId, amountCents: totalCents, reference: ref, idem: `pos-${id}`, type, installments: base.installments, description: `Venda ${ent.name}` });
+        let o;
+        try { o = await this.mp.createPointOrder({ accessToken: token, terminalId: c.point.terminalId, amountCents: totalCents, reference: ref, idem: `pos-${id}`, type, installments: base.installments, description: `Venda ${ent.name}` }); }
+        catch (e) { throw (await this.pointProblem(token, c.point.terminalId)) ?? e; }
         extra = { providerRef: o.id };
       }
     } else if (dto.provider === 'infinitetap') {
@@ -178,6 +255,10 @@ export class PosService {
     }
     try {
       const doc = await this.payments.create({ ...base, ...extra });
+      // Modo token: os avisos do Mercado Pago podem não chegar ao Balcão; a cobrança entra na consulta automática.
+      if ((dto.provider === 'mp_pix' || dto.provider === 'mp_point') && (await this.stores.mpMode((await this.stores.getOrCreate(eid))._id)) === 'token') {
+        await this.polls?.track('pos', doc._id, eoid, new Date()).catch(() => undefined);
+      }
       return this.present(doc);
     } catch (e) {
       if (dto.clientKey && isDuplicateKeyError(e)) { const prev = await this.payments.findOne({ enterpriseId: eoid, clientKey: dto.clientKey }); if (prev) return this.present(prev); }
@@ -191,8 +272,36 @@ export class PosService {
     return p;
   }
 
-  /** Pergunta ao provedor como está; se pagou, registra a venda. O caixa chama a cada 2 s enquanto espera. */
-  async status(eid: string, id: string) { return this.present(await this.sync(await this.one(eid, id))); }
+  /**
+   * Pergunta ao provedor como está; se pagou, registra a venda. O caixa chama a cada 2 s enquanto espera. Cobrança na
+   * consulta automática (modo token) já sendo consultada agora por outro (rotina, aviso): devolve como está.
+   */
+  async status(eid: string, id: string) {
+    const p = await this.one(eid, id);
+    if (!this.polls || p.status !== 'pending' || (p.provider !== 'mp_pix' && p.provider !== 'mp_point')) return this.present(await this.sync(p));
+    let latest = p;
+    await this.polls.lease('pos', p._id, async () => { latest = await this.sync(p); return latest.status === 'pending' ? 'pending' : latest.status; });
+    return this.present(latest.status === 'pending' ? (await this.payments.findById(p._id)) ?? latest : latest);
+  }
+
+  /** Consulta automática e aviso do Mercado Pago (modo token): confere a cobrança e devolve como ficou. */
+  async syncById(eid: string, id: string): Promise<string> {
+    const p = await this.payments.findOne({ _id: new Types.ObjectId(id), enterpriseId: new Types.ObjectId(eid) });
+    if (!p) return 'gone';
+    const r = await this.sync(p);
+    return r.status === 'pending' ? 'pending' : r.status; // paid | failed | canceled encerram a consulta
+  }
+
+  /** Cobrança na Point recusada: explica quando é porque a maquininha saiu da conta ou não está em modo PDV. */
+  private async pointProblem(token: string, terminalId: string): Promise<Error | null> {
+    if (!terminalId) return null;
+    const list = await this.mp.terminals(token).catch(() => null);
+    if (!list) return null;
+    const t = list.find((x) => x.id === terminalId);
+    if (!t) return new ConflictException({ statusCode: 409, code: 'TERMINAL_NOT_IN_ACCOUNT', message: 'A maquininha escolhida não está associada a esta conta do Mercado Pago. Abra Configurações → Pix e maquininhas e escolha de novo.' });
+    if (t.operatingMode.toUpperCase() !== 'PDV') return new ConflictException({ statusCode: 409, code: 'TERMINAL_NOT_PDV', message: 'A maquininha não está em modo PDV, então não recebe cobranças do caixa. Em Configurações → Pix e maquininhas, escolha a maquininha de novo para ativar o modo PDV e depois reinicie a maquininha.' });
+    return null;
+  }
 
   async sync(p: PosPaymentDocument): Promise<PosPaymentDocument> {
     if (p.status === 'paid' && !p.saleId) return this.finalize(p, {}); // pagou mas a venda não fechou: tenta de novo

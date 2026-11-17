@@ -94,9 +94,9 @@ const storeId = new Types.ObjectId();
 const prodA = { _id: new Types.ObjectId(), name: 'Vestido Midi', code: 'V1', price: 189.9, priceWithDiscount: 0, trackStock: true, quantity: 5 };
 const prodB = { _id: new Types.ObjectId(), name: 'Perfume 100ml', code: 'P1', price: 149.9, priceWithDiscount: 0, trackStock: true, quantity: 2 };
 
-function setup(over: { linkFails?: boolean; refundFails?: boolean; promo?: { priceCents: number; grant: number }; trial?: boolean } = {}) {
+function setup(over: { linkFails?: boolean; refundFails?: boolean; promo?: { priceCents: number; grant: number }; trial?: boolean; mpMode?: 'oauth' | 'token' } = {}) {
   const docs = new Map<string, any>();
-  const store: any = { _id: storeId, enterpriseId: eid, slug: 'bella-moda', name: 'Bella Moda', mp: { userId: '555' }, minOrderCents: 0, ordersPaused: false, theme: {}, shipping: {} };
+  const store: any = { _id: storeId, enterpriseId: eid, slug: 'bella-moda', name: 'Bella Moda', mp: { userId: '555', ...(over.mpMode ? { mode: over.mpMode } : {}) }, minOrderCents: 0, ordersPaused: false, theme: {}, shipping: {} };
   const asDoc = (d: any) => Object.assign(d, { toJSON: () => ({ ...d }) });
   const orders: any = {
     create: jest.fn(async ([d]) => { const doc = asDoc({ ...d, saleId: null, stockReleased: false, stockIssue: false, refundNeeded: false, tracking: { code: '', url: '' } }); docs.set(String(d._id), doc); return [doc]; }),
@@ -145,19 +145,20 @@ function setup(over: { linkFails?: boolean; refundFails?: boolean; promo?: { pri
   const mail: any = { send: jest.fn(async () => undefined) };
   const config: any = { get: (k: string) => ({ APP_URL: 'https://api.balcao.app', FRONTEND_URL: 'https://balcao.app' } as Record<string, string>)[k] };
   const enterprises: any = { findEnterpriseById: jest.fn(async () => ({ email: 'dono@bella.com', createdAt: new Date('2020-01-01'), trialEndsAt: over.trial ? new Date(Date.now() + 86_400_000) : new Date('2020-02-01') })) };
-  const billing: any = { onlineRate: jest.fn(async (src: string) => (src === 'directory' ? 300 : 150)), reverseCollectedFee: jest.fn(async () => undefined) };
+  const billing: any = { onlineRate: jest.fn(async (src: string) => (src === 'directory' ? 300 : 150)), reverseCollectedFee: jest.fn(async () => undefined), reverseOnlineFee: jest.fn(async () => undefined) };
   const customers: any = { ensureForShopper: jest.fn(async () => ({ _id: new Types.ObjectId() })) };
   const shoppers: any = { rememberCheckout: jest.fn(async () => undefined) };
   // Sem cupom nem cashback nestes testes (o fluxo deles tem testes próprios em rewards.spec.ts).
   const rewards: any = { releaseCoupon: async () => undefined, restoreCredit: async () => undefined, reverseEarn: async () => undefined, earn: async () => undefined, respendIfNeeded: async () => undefined, cashbackOf: async () => null, balance: async () => 0 };
-  const svc = new OrderService(orders, connection, stores, products, promotions, sales, mp, mail, config, enterprises, billing, customers, shoppers, rewards);
+  const polls: any = { track: jest.fn(async () => undefined) };
+  const svc = new OrderService(orders, connection, stores, products, promotions, sales, mp, mail, config, enterprises, billing, customers, shoppers, rewards, polls);
   /** Simula um pagamento no Mercado Pago para o pedido. */
   const pay = (orderId: string, o: Partial<{ status: string; amountCents: number; feeCents: number; collector: string; ref: string }> = {}) => {
     const id = String(900000 + payments.size);
     payments.set(id, { id, status: o.status ?? 'approved', statusDetail: '', externalReference: o.ref ?? orderId, amountCents: o.amountCents ?? docs.get(orderId).totalCents, collectorId: o.collector ?? '555', marketplaceFeeCents: o.feeCents ?? docs.get(orderId).feeCents, method: 'pix', approvedAt: null });
     return id;
   };
-  return { svc, customers, shoppers, docs, orders, stock, products, promotions, stores, sales, mp, mail, store, billing, pay, payments };
+  return { svc, customers, shoppers, docs, orders, stock, products, promotions, stores, sales, mp, mail, store, billing, pay, payments, polls };
 }
 
 const customer = { name: 'Ana Souza', email: 'ana@ex.com', phone: '85999990000' };
@@ -314,7 +315,7 @@ describe('pedido online (Mercado Pago com comissão automática)', () => {
     expect(t.mp.refund).toHaveBeenCalledWith(t.docs.get(r.orderId).payment.paymentId, 'APP_USR-seller', `refund-${r.orderId}`);
     expect(c).toMatchObject({ status: 'cancelled', refundNeeded: false, fee: { cents: 0 } });
     expect(t.sales.cancel).toHaveBeenCalledWith(String(eid), expect.any(String), expect.objectContaining({ fromOrder: true }));
-    expect(t.billing.reverseCollectedFee).toHaveBeenCalled();
+    expect(t.billing.reverseOnlineFee).toHaveBeenCalled(); // estorna a taxa em qualquer modo (split ou fatura)
   });
 
   it('estorno automático falhou: cancela e avisa para devolver na mão', async () => {
@@ -635,5 +636,57 @@ describe('vídeos da vitrine', () => {
     expect(parseRange('bytes=1000-', 1000)).toBe('invalid');
     expect(parseRange('bytes=5-2', 1000)).toBe('invalid');
     expect(parseRange('items=0-1', 1000)).toBe('invalid');
+  });
+});
+
+// ------------------------------------------------------------------ conta Mercado Pago por credencial (modo token)
+
+describe('loja online com o Mercado Pago conectado por credencial (modo token)', () => {
+  const buy = (t: ReturnType<typeof setup>) => t.svc.checkout('bella-moda', { acceptTerms: true, emailToken: ET, items: [{ productId: String(prodA._id), quantity: 1 }], customer, shippingOptionId: 'pickup' });
+
+  it('cria a ordem SEM marketplace_fee e guarda que a taxa vai para a fatura', async () => {
+    const t = setup({ mpMode: 'token' });
+    const r = await buy(t);
+    expect(t.mp.createPreference.mock.calls[0][0].marketplaceFeeCents).toBe(0);
+    expect(t.docs.get(r.orderId)).toMatchObject({ feeCollection: 'invoice', feeCents: Math.ceil(18990 * 150 / 10000) });
+    expect(t.polls.track).toHaveBeenCalledWith('order', expect.anything(), eid, expect.any(Date)); // entra na consulta automática
+  });
+
+  it('OAuth continua com marketplace_fee (o Mercado Pago separa) e sem consulta automática', async () => {
+    const t = setup();
+    const r = await buy(t);
+    expect(t.mp.createPreference.mock.calls[0][0].marketplaceFeeCents).toBe(t.docs.get(r.orderId).feeCents);
+    expect(t.docs.get(r.orderId).feeCollection).toBe('split');
+    expect(t.polls.track).not.toHaveBeenCalled();
+  });
+
+  it('pago: a venda nasce com a taxa lançada na fatura; aviso e consulta juntos não duplicam venda nem taxa', async () => {
+    const t = setup({ mpMode: 'token' });
+    const r = await buy(t);
+    const pid = t.pay(r.orderId, { feeCents: 0 }); // no modo token o Mercado Pago não separou nada
+    t.docs.get(r.orderId).payment.preferenceId = pid; // a ordem do Checkout Pro que a consulta automática confere
+    const [a, b] = await Promise.all([t.svc.webhook(hook(r.orderId, pid).q, hook(r.orderId, pid).body, {}), t.svc.pollOnce(r.orderId)]);
+    expect([a.outcome, b].sort()).toEqual(['already_paid', 'applied']);
+    expect(t.sales.recordOnlineSale).toHaveBeenCalledTimes(1);
+    expect(t.sales.recordOnlineSale.mock.calls[0][1]).toMatchObject({ feeCollection: 'invoice' });
+    expect(t.stock.get(String(prodA._id))).toBe(4); // baixou uma vez só
+  });
+
+  it('aviso mentindo "approved": o pagamento consultado no Mercado Pago está pendente, então nada é confirmado', async () => {
+    const t = setup({ mpMode: 'token' });
+    const r = await buy(t);
+    const pid = t.pay(r.orderId, { status: 'pending' });
+    const fake = { ...hook(r.orderId, pid).body, action: 'payment.updated', status: 'approved', data: { id: pid, status: 'approved' } };
+    expect((await t.svc.webhook(hook(r.orderId, pid).q, fake, {})).outcome).toBe('pending');
+    expect(t.docs.get(r.orderId).status).toBe('pending_payment');
+    expect(t.sales.recordOnlineSale).not.toHaveBeenCalled();
+  });
+
+  it('consulta automática para quando o pedido já saiu da espera do pagamento', async () => {
+    const t = setup({ mpMode: 'token' });
+    const r = await buy(t);
+    t.docs.get(r.orderId).status = 'cancelled';
+    expect(await t.svc.pollOnce(r.orderId)).toBe('gone');
+    expect(t.mp.payment).not.toHaveBeenCalled();
   });
 });

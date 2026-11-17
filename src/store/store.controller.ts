@@ -3,7 +3,7 @@ import { DomainService } from './domain.service';
 import { Throttle } from '@nestjs/throttler';
 import { StoreService } from './store.service';
 import { OrderService } from './order.service';
-import { MpCallbackDto, SlugQueryDto, StoreUpdateDto, TestQuoteDto, VisibilityDto, StorePageDto, StoreDomainDto } from './dto/store.dto';
+import { MpCallbackDto, MpTokenDto, SlugQueryDto, StoreUpdateDto, TestQuoteDto, VisibilityDto, StorePageDto, StoreDomainDto } from './dto/store.dto';
 import { CollectDto, LabelDto, LabelsPrintDto, OrderCancelDto, OrderListQueryDto, OrderStatusDto, ReplyDto, PrintQueueDto } from './dto/order.dto';
 import { LogisticsService } from './logistics.service';
 import { ProtectionService } from './protection.service';
@@ -76,6 +76,17 @@ export class StoreConfigController {
   @HttpCode(200)
   mpCallback(@CurrentEnterprise() eid: string, @Body() dto: MpCallbackDto) {
     return this.stores.mpCallback(eid, dto.code, dto.state);
+  }
+
+  /**
+   * Conexão por credencial: o dono cola o Access Token e a Public Key de produção da aplicação dele no Mercado Pago.
+   * Só o dono (colaborador não tem regra para /store-config/mercadopago/*). A resposta nunca traz o token.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('mercadopago/token')
+  @HttpCode(200)
+  mpToken(@CurrentEnterprise() eid: string, @Body() dto: MpTokenDto) {
+    return this.stores.mpConnectToken(eid, dto);
   }
 
   @Post('mercadopago/disconnect')

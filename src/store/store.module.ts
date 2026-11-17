@@ -3,6 +3,8 @@ import { DomainService } from './domain.service';
 import { MessagesModule } from '../messages/messages.module';
 import { MpOrdersWebhookService } from './mp-orders-webhook.service';
 import { Module } from '@nestjs/common';
+import { MpPoll, MpPollSchema } from './schema/mp-poll.schema';
+import { MpPollService } from './mp-poll.service';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Store, StoreSchemaFactory } from './schema/store.schema';
 import { Order, OrderSchemaFactory } from './schema/order.schema';
@@ -61,11 +63,12 @@ import { StaffModule } from '../staff/staff.module';
       { name: Store.name, schema: StoreSchemaFactory },
       { name: Order.name, schema: OrderSchemaFactory },
       { name: Tab.name, schema: TabSchemaFactory },
+      { name: MpPoll.name, schema: MpPollSchema },
     ]),
     MessagesModule, EnterprisesModule, ProductModule, CategorysModule, PromotionModule, SaleModule, BillingModule, MailModule, SettingsModule, MercadoPagoModule, CustomerModule, ShopperModule, StaffModule,
   ],
   controllers: [StoreConfigController, MediaController, OrderController, SeoController, ShareController, MarketplaceController, MarketBannerController, CouponController, PublicReviewController, MerchantReviewController, StorefrontController, ShopperAccountController, TabController, TabPublicController],
-  providers: [DomainService, MpOrdersWebhookService, CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
-  exports: [StoreService, OrderService, ProtectionService, TabService, MarketBannerService],
+  providers: [MpPollService, DomainService, MpOrdersWebhookService, CodeService, MarketplaceService, MarketBannerService, RewardsService, ReviewService, SoldCountScheduler, StoreService, OrderService, MelhorEnvioClient, StoreScheduler, MediaService, EmailCodeService, ProtectionService, LogisticsService, TabService],
+  exports: [StoreService, OrderService, ProtectionService, TabService, MarketBannerService, MpPollService, MpOrdersWebhookService],
 })
 export class StoreModule {}

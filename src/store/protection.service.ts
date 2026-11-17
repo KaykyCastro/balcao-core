@@ -113,7 +113,7 @@ export class ProtectionService {
       $set: { 'payment.refundedAt': now, refundNeeded: false, feeCents: 0, 'protection.status': 'refunded', ...(o.dispute?.status === 'open' ? resolved : {}) },
       $push: { history: { status: 'delivered', at: now, note: `Reembolsado: ${reason}` } },
     });
-    if (o.saleId) await this.billing.reverseCollectedFee(o.saleId).catch(() => undefined);
+    if (o.saleId) await this.billing.reverseOnlineFee(String(o.enterpriseId), o.saleId).catch(() => undefined);
     void this.mail.send(o.customer.email, `Reembolso do pedido #${o.number}`, `Devolvemos ${fmt(o.totalCents)} pelo Mercado Pago, no mesmo meio de pagamento.\nPix: em até 1 dia útil. Cartão: na fatura, conforme o banco (até 2 faturas).`).catch(() => undefined);
     return (await this.orders.findById(o._id))!;
   }

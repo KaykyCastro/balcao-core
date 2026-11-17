@@ -4,6 +4,7 @@ import { PosConfig, PosConfigSchemaFactory, PosPayment, PosPaymentSchemaFactory 
 import { PosService } from './pos.service';
 import { PosController } from './pos.controller';
 import { PosScheduler } from './pos.scheduler';
+import { MpPollScheduler } from './mp-poll.scheduler';
 import { StoneClient } from './stone.client';
 import { MercadoPagoModule } from '../mercadopago/mercadopago.module';
 import { SaleModule } from '../sale/sale.module';
@@ -17,6 +18,6 @@ import { CustomerModule } from '../customer/customer.module';
     MercadoPagoModule, SaleModule, StoreModule, EnterprisesModule, CustomerModule,
   ],
   controllers: [PosController],
-  providers: [PosService, PosScheduler, StoneClient],
+  providers: [PosService, PosScheduler, MpPollScheduler, StoneClient],
 })
 export class PosModule {}

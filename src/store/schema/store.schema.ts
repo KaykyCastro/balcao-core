@@ -159,13 +159,25 @@ export class Store {
   @Prop(raw({ name: { type: String, default: '' }, document: { type: String, default: '' }, address: { type: String, default: '' }, email: { type: String, default: '' }, phone: { type: String, default: '' } }))
   legal: { name: string; document: string; address: string; email: string; phone: string };
 
-  /** Conta Mercado Pago do lojista, conectada por OAuth. Tokens cifrados e nunca enviados ao navegador. */
+  /**
+   * Conta Mercado Pago do lojista. `mode`: 'oauth' (o lojista autoriza a aplicação do Balcão; token renovado sozinho)
+   * ou 'token' (o lojista cola as credenciais de produção da aplicação dele; sem refresh, ver mp-token.rules.ts).
+   * Lojas conectadas antes do modo token não têm o campo e contam como 'oauth'. Tokens cifrados e nunca enviados ao
+   * navegador; `tokenHash` (sha256 do token, nunca exposto) liga um 401 do Mercado Pago à loja certa.
+   * `status`: 'invalid' quando o Mercado Pago recusou o token (o lojista precisa colar um novo); os dados ficam.
+   */
   @Prop(raw({
     userId: { type: String, default: '' }, nickname: { type: String, default: '' }, email: { type: String, default: '' }, publicKey: { type: String, default: '' },
     accessSealed: { type: String, default: null, select: false }, refreshSealed: { type: String, default: null, select: false },
     expiresAt: { type: Date, default: null }, connectedAt: { type: Date, default: null },
+    mode: { type: String, enum: ['oauth', 'token'], default: 'oauth' },
+    status: { type: String, enum: ['ok', 'invalid'], default: 'ok' }, invalidAt: { type: Date, default: null },
+    tokenHash: { type: String, default: null, select: false },
   }))
-  mp: { userId: string; nickname: string; email: string; publicKey: string; accessSealed?: string | null; refreshSealed?: string | null; expiresAt: Date | null; connectedAt: Date | null };
+  mp: {
+    userId: string; nickname: string; email: string; publicKey: string; accessSealed?: string | null; refreshSealed?: string | null; expiresAt: Date | null; connectedAt: Date | null;
+    mode?: 'oauth' | 'token'; status?: 'ok' | 'invalid'; invalidAt?: Date | null; tokenHash?: string | null;
+  };
 
   @Prop({ default: 0, min: 0 })
   minOrderCents: number;
@@ -222,6 +234,8 @@ export class Store {
 }
 
 export const StoreSchemaFactory = SchemaFactory.createForClass(Store);
+// 401 do Mercado Pago no modo token → acha a loja pelo hash do token recusado.
+StoreSchemaFactory.index({ 'mp.tokenHash': 1 }, { sparse: true });
 StoreSchemaFactory.index({ enabled: 1, listed: 1, segment: 1 });
 // Um domínio ativo pertence a uma loja só.
 StoreSchemaFactory.index({ 'domain.host': 1 }, { unique: true, partialFilterExpression: { 'domain.status': 'active' } });

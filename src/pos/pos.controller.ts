@@ -3,7 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { IsString, MaxLength } from 'class-validator';
 import { CurrentEnterprise } from '../common/decorators/current-enterprise.decorator';
 import { ParseMongoIdPipe } from '../common/pipes/parse-mongo-id.pipe';
-import { PosChargeDto, PosConfigDto, TapResultDto } from './dto';
+import { PointStoreDto, PointTerminalDto, PosChargeDto, PosConfigDto, TapResultDto } from './dto';
 import { PosService } from './pos.service';
 
 class TerminalDto { @IsString() @MaxLength(80) terminalId: string }
@@ -20,6 +20,18 @@ export class PosController {
   @Get('terminals') terminals(@CurrentEnterprise() eid: string) { return this.pos.terminals(eid); }
   @Post('terminals/pdv') @HttpCode(200)
   pdv(@CurrentEnterprise() eid: string, @Body() dto: TerminalDto) { return this.pos.setPdv(eid, dto.terminalId); }
+
+  /**
+   * Assistente da Point (só o dono: /pos/point/* não tem regra de colaborador). Situação, criar loja e caixa no Mercado
+   * Pago, escolher a maquininha (ativa o modo PDV).
+   */
+  @Get('point/setup') pointSetup(@CurrentEnterprise() eid: string) { return this.pos.pointSetup(eid); }
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('point/mp-store') @HttpCode(200)
+  pointStore(@CurrentEnterprise() eid: string, @Body() dto: PointStoreDto) { return this.pos.pointCreateMpStore(eid, dto); }
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('point/terminal') @HttpCode(200)
+  pointTerminal(@CurrentEnterprise() eid: string, @Body() dto: PointTerminalDto) { return this.pos.pointChoose(eid, dto.terminalId, dto.label); }
 
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post('charges')

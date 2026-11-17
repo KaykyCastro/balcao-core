@@ -73,7 +73,7 @@ function setup(rows: any[]) {
   const enterprises: any = { findEnterpriseById: jest.fn(async () => ({ email: 'dono@loja.com' })) };
   const mp: any = { refund: jest.fn(async () => undefined) };
   const stores: any = { mpAccessToken: jest.fn(async () => 'APP_USR-x') };
-  const billing: any = { reverseCollectedFee: jest.fn(async () => undefined) };
+  const billing: any = { reverseCollectedFee: jest.fn(async () => undefined), reverseOnlineFee: jest.fn(async () => undefined) };
   const svc = new ProtectionService(orders, orderService, stores, mp, mail, enterprises, billing);
   return { svc, orderService, mail, mp, billing };
 }
@@ -106,7 +106,7 @@ describe('Compra protegida: rotina', () => {
     await t.svc.resolve(String(o._id), 'refund', 'adm@balcao.app', 'Fotos comprovam o defeito');
     expect(t.mp.refund).toHaveBeenCalledWith('123', 'APP_USR-x', `refund-${o._id}`);
     expect(o).toMatchObject({ dispute: { status: 'resolved_refund' }, protection: { status: 'refunded' } });
-    expect(t.billing.reverseCollectedFee).toHaveBeenCalled();
+    expect(t.billing.reverseOnlineFee).toHaveBeenCalled(); // estorna a taxa em qualquer modo (split ou fatura)
   });
 
   it('comprador confirma o recebimento: vira entregue e encerra a proteção', async () => {
