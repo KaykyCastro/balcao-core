@@ -2,7 +2,8 @@ import { Prop, Schema, SchemaFactory, raw } from '@nestjs/mongoose';
 import { Schema as MongooseSchema, Types, HydratedDocument } from 'mongoose';
 
 export type SaleDocument = HydratedDocument<Sale>;
-export type PaymentMethod = 'cash' | 'pix' | 'card' | 'other' | 'fiado' | 'online';
+/** 'credit' = paga inteira com o crédito da loja do cliente; 'exchange' = paga inteira com o valor de uma troca. */
+export type PaymentMethod = 'cash' | 'pix' | 'card' | 'other' | 'fiado' | 'online' | 'credit' | 'exchange';
 
 @Schema({ _id: false })
 export class SaleItem {
@@ -55,8 +56,22 @@ export class Sale {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'CustomerSchema', default: null, index: true })
   customerId: Types.ObjectId | null;
 
-  @Prop({ type: String, enum: ['cash', 'pix', 'card', 'other', 'fiado', 'online'], required: true })
+  @Prop({ type: String, enum: ['cash', 'pix', 'card', 'other', 'fiado', 'online', 'credit', 'exchange'], required: true })
   paymentMethod: PaymentMethod;
+
+  /** Parte do total paga com o crédito da loja do cliente (sobra de troca). O resto foi pago por `paymentMethod`. */
+  @Prop({ type: Number, min: 0, default: 0 })
+  creditCents?: number;
+
+  /** Venda nascida de uma troca: a parte do total paga com o valor dos itens devolvidos. */
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Exchange', default: undefined })
+  exchangeId?: Types.ObjectId;
+  @Prop({ type: Number, min: 0, default: 0 })
+  exchangeCents?: number;
+
+  /** Valor já devolvido em trocas desta venda (soma). Também serve de trava: duas trocas da mesma venda ao mesmo tempo não passam do vendido. */
+  @Prop({ type: Number, min: 0, default: 0 })
+  returnedCents?: number;
 
   /** 'online' = pedido pago na loja online (Mercado Pago do lojista). Ausente = balcão. */
   @Prop({ type: String, enum: ['pos', 'online'], default: 'pos' })
@@ -128,6 +143,10 @@ export class Sale {
   /** Header Idempotency-Key: repetir o POST (rede caiu) devolve esta venda em vez de criar outra. */
   @Prop({ type: String, maxlength: 64 })
   idempotencyKey?: string;
+
+  /** Preenchidos pelo Mongoose (timestamps). */
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export const SaleSchemaFactory = SchemaFactory.createForClass(Sale);

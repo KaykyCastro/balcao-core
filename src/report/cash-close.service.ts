@@ -5,6 +5,7 @@ import { Sale } from '../sale/schema/sale.schema';
 import { CustomerPayment } from '../customer/schema/customer-payment.schema';
 import type { StaffSession } from '../staff/staff.service';
 import { CashClosing } from './schema/cash-closing.schema';
+import { Exchange } from '../exchange/schema/exchange.schema';
 import { centsOk, dayOf, dayRange, daySummary } from './cash-close.rules';
 
 /** Quem está vendo: o dono (staff null) ou um colaborador. Sem "relatórios", o colaborador só vê e fecha o dia de hoje. */
@@ -16,6 +17,7 @@ export class CashCloseService {
     @InjectModel(Sale.name) private readonly sales: Model<Sale>,
     @InjectModel(CustomerPayment.name) private readonly payments: Model<CustomerPayment>,
     @InjectModel(CashClosing.name) private readonly closings: Model<CashClosing>,
+    @InjectModel(Exchange.name) private readonly exchanges: Model<Exchange>,
   ) {}
 
   private allowDay(day: string, who: Viewer) {
@@ -27,12 +29,13 @@ export class CashCloseService {
   private async summarize(enterpriseId: string, day: string, openingCents = 0) {
     const { from, to } = dayRange(day);
     const eid = new Types.ObjectId(enterpriseId);
-    const [sales, payments] = await Promise.all([
+    const [sales, payments, exchanges] = await Promise.all([
       this.sales.find({ enterpriseId: eid, createdAt: { $gte: from, $lt: to } })
-        .select('paymentMethod status totalCents discountCents createdAt staff items.productName items.quantity items.totalCents').lean(),
+        .select('paymentMethod status totalCents discountCents creditCents exchangeCents createdAt staff items.productName items.quantity items.totalCents').lean(),
       this.payments.find({ enterpriseId: eid, createdAt: { $gte: from, $lt: to } }).select('method amountCents').lean(),
+      this.exchanges.find({ enterpriseId: eid, createdAt: { $gte: from, $lt: to } }).select('returnedCents refundCents refundMethod creditCents').lean(),
     ]);
-    return daySummary(day, sales as never, payments as never, openingCents);
+    return daySummary(day, sales as never, payments as never, openingCents, exchanges as never);
   }
 
   /** Resumo do dia + o fechamento já feito (se houver). */

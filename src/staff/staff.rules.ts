@@ -40,6 +40,8 @@ const RULES: Rule[] = [
   { re: /^\/category(\/.*)?$/, read: ['sales', 'tables', 'orders', 'stock'], write: ['stock'] },
   { re: /^\/promotion(\/.*)?$/, read: ['sales', 'tables', 'stock'], write: ['stock'] },
   { re: /^\/customer(\/.*)?$/, read: ['sales', 'customers'], write: ['customers'] },
+  // Trocas e devoluções no balcão: quem vende também troca (o prazo e os limites são conferidos na API).
+  { re: /^\/exchanges(\/.*)?$/, read: ['sales'], write: ['sales'] },
   // salão e loja online
   { re: /^\/tabs(\/.*)?$/, read: ['tables'], write: ['tables'] },
   { re: /^\/orders\/summary$/, read: ['orders', 'tables'] },

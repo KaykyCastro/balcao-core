@@ -52,4 +52,11 @@ export class SaleCreateDto {
 
   @IsOptional() @ValidateNested() @Type(() => SaleDiscountDto)
   discount?: SaleDiscountDto;
+
+  /**
+   * Usar o crédito da loja do cliente (sobra de troca), até este valor em centavos. Exige `customerId`. A API usa no
+   * máximo o total da venda e confere o saldo; o resto é pago por `paymentMethod`.
+   */
+  @IsOptional() @IsInt() @Min(1) @Max(CASH_MAX_CENTS)
+  useCreditCents?: number;
 }

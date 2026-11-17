@@ -85,8 +85,24 @@ export class SaleService {
   }
 
   private async createOnce(enterpriseId: string, dto: SaleCreateDto, idempotencyKey?: string, payment?: Sale['payment'], staff?: { id: string; name: string } | null): Promise<SaleDocument> {
+    const prep = await this.prepare(enterpriseId, dto, staff);
+    const session = await this.connection.startSession();
+    try {
+      let sale!: SaleDocument;
+      await session.withTransaction(async () => {
+        sale = await this.write(enterpriseId, dto, prep, session, { saleId: new Types.ObjectId(), idempotencyKey, payment, staff });
+      });
+      return sale;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  /** Conferências e leituras antes da transação (cliente, produtos, teto de desconto). */
+  async prepare(enterpriseId: string, dto: SaleCreateDto, staff?: { id: string } | null) {
     const isFiado = dto.paymentMethod === 'fiado';
     if (isFiado && !dto.customerId) throw new BadRequestException('Venda com pagamento posterior exige um cliente');
+    if (dto.useCreditCents && !dto.customerId) throw new BadRequestException('Para usar o crédito da loja, escolha o cliente');
     if (dto.customerId) await this.customerService.getCustomerById(enterpriseId, dto.customerId); // 404 se não for da empresa
     if (isFiado) await this.customerService.assertCanOwe(enterpriseId, dto.customerId!); // conta do marketplace só depois de pertencer à loja
 
@@ -94,75 +110,88 @@ export class SaleService {
     const products = new Map<string, Awaited<ReturnType<ProductService['getProductById']>>>();
     for (const productId of new Set(dto.items.map((i) => i.productId))) products.set(productId, await this.productService.getProductById(enterpriseId, productId));
     const grouped = this.lines(dto.items, products as Map<string, { name: string; options?: OptionGroup[] | null }>);
-
     const discountCap = dto.discount ? await this.staffDiscountCap(enterpriseId, staff) : null;
-    const saleId = new Types.ObjectId();
-    const session = await this.connection.startSession();
-    try {
-      let sale!: SaleDocument;
-      await session.withTransaction(async () => {
-        // Preços decididos dentro da transação: as unidades de promoção são reservadas junto com o estoque,
-        // então duas vendas ao mesmo tempo nunca passam do limite da promoção.
-        const items: SaleItem[] = [];
-        let totalCents = 0;
-        const promos = await this.promotionService.activeFor(enterpriseId, [...grouped.keys()], session);
-        for (const [productId, g] of grouped) {
-          const quantity = g.quantity;
-          const product = products.get(productId)!;
-          const r = await this.productService.decreaseQuantity(enterpriseId, productId, quantity, session);
-          const normalCents = toCents(effectivePrice(product));
-          const originalUnitPriceCents = Math.max(toCents(product.price), normalCents);
-          const base = { productId: product._id, productName: product.name, productCode: product.code, originalUnitPriceCents, stockTracked: r.tracked };
-          const promo = promos.get(productId);
-          // Promoção só vale se deixar mais barato que o preço atual.
-          const promoQty = promo && promo.promoPriceCents < normalCents ? await this.promotionService.consume(promo, quantity, session) : 0;
-          // Cada linha: preço base (promoção até o limite, depois o normal) + o adicional das opções escolhidas.
-          for (const part of splitPromoUnits(g.lines, promoQty, promo?.promoPriceCents ?? 0, normalCents)) {
-            items.push({
-              ...base, unitPriceCents: part.unitCents, quantity: part.quantity, totalCents: part.unitCents * part.quantity,
-              ...(part.promo ? { promotionId: promo!._id } : {}),
-              ...(part.line.picked.length ? { options: part.line.picked } : {}), ...(part.line.note ? { note: part.line.note } : {}),
-            });
-            totalCents += part.unitCents * part.quantity;
-          }
-        }
+    return { products, grouped, discountCap };
+  }
 
-        // Desconto do carrinho: sobre o total já com promoções; nunca zera a venda; colaborador tem teto.
-        const subtotalCents = totalCents;
-        const discountCents = applySaleDiscount(subtotalCents, dto.discount, discountCap);
-        totalCents = subtotalCents - discountCents;
-
-        const cash = cashChange(dto.paymentMethod, totalCents, dto.cashReceivedCents); // valor recebido x total final
-
-        // Taxa de 0,5% + teto de R$ 40: se bloqueado, lança 402 e a transação inteira é desfeita.
-        const feeCents = await this.billingService.applyFee(enterpriseId, saleId, totalCents, session);
-        if (isFiado) await this.customerService.increaseDebit(enterpriseId, dto.customerId!, totalCents, session);
-
-        const [created] = await this.saleModel.create(
-          [
-            {
-              _id: saleId,
-              enterpriseId,
-              customerId: dto.customerId ?? null,
-              paymentMethod: dto.paymentMethod,
-              items,
-              totalCents,
-              ...(discountCents > 0 ? { subtotalCents, discountCents, discount: { mode: dto.discount!.mode, value: dto.discount!.value, ...(dto.discount!.reason?.trim() ? { reason: dto.discount!.reason.trim() } : {}) } } : {}),
-              feeCents,
-              ...cash,
-              ...(payment ? { payment } : {}),
-              ...(staff ? { staff: { id: new Types.ObjectId(staff.id), name: staff.name } } : {}),
-              ...(idempotencyKey ? { idempotencyKey } : {}),
-            },
-          ],
-          { session },
-        );
-        sale = created;
-      });
-      return sale;
-    } finally {
-      await session.endSession();
+  /**
+   * Grava a venda DENTRO da transação de quem chama (venda comum ou troca). Baixa estoque e promoções, aplica o desconto,
+   * usa o valor de uma troca (`exchange`) e/ou o crédito da loja do cliente (`dto.useCreditCents`) e cobra o resto por
+   * `paymentMethod`. A taxa do Balcão é só sobre o dinheiro novo (o valor da troca e o crédito já pagaram taxa antes).
+   */
+  async write(
+    enterpriseId: string, dto: SaleCreateDto, prep: Awaited<ReturnType<SaleService['prepare']>>, session: ClientSession,
+    opts: { saleId: Types.ObjectId; idempotencyKey?: string; payment?: Sale['payment']; staff?: { id: string; name: string } | null; exchange?: { id: Types.ObjectId; cents: number } },
+  ): Promise<SaleDocument> {
+    const { products, grouped, discountCap } = prep;
+    const saleId = opts.saleId;
+    // Preços decididos dentro da transação: as unidades de promoção são reservadas junto com o estoque,
+    // então duas vendas ao mesmo tempo nunca passam do limite da promoção.
+    const items: SaleItem[] = [];
+    let totalCents = 0;
+    const promos = await this.promotionService.activeFor(enterpriseId, [...grouped.keys()], session);
+    for (const [productId, g] of grouped) {
+      const quantity = g.quantity;
+      const product = products.get(productId)!;
+      const r = await this.productService.decreaseQuantity(enterpriseId, productId, quantity, session);
+      const normalCents = toCents(effectivePrice(product));
+      const originalUnitPriceCents = Math.max(toCents(product.price), normalCents);
+      const base = { productId: product._id, productName: product.name, productCode: product.code, originalUnitPriceCents, stockTracked: r.tracked };
+      const promo = promos.get(productId);
+      // Promoção só vale se deixar mais barato que o preço atual.
+      const promoQty = promo && promo.promoPriceCents < normalCents ? await this.promotionService.consume(promo, quantity, session) : 0;
+      // Cada linha: preço base (promoção até o limite, depois o normal) + o adicional das opções escolhidas.
+      for (const part of splitPromoUnits(g.lines, promoQty, promo?.promoPriceCents ?? 0, normalCents)) {
+        items.push({
+          ...base, unitPriceCents: part.unitCents, quantity: part.quantity, totalCents: part.unitCents * part.quantity,
+          ...(part.promo ? { promotionId: promo!._id } : {}),
+          ...(part.line.picked.length ? { options: part.line.picked } : {}), ...(part.line.note ? { note: part.line.note } : {}),
+        });
+        totalCents += part.unitCents * part.quantity;
+      }
     }
+
+    // Desconto do carrinho: sobre o total já com promoções; nunca zera a venda; colaborador tem teto.
+    const subtotalCents = totalCents;
+    const discountCents = applySaleDiscount(subtotalCents, dto.discount, discountCap);
+    totalCents = subtotalCents - discountCents;
+
+    // O que já está pago: valor da troca e crédito da loja (nunca mais que o total). O resto é cobrado agora.
+    const exchangeCents = Math.min(opts.exchange?.cents ?? 0, totalCents);
+    const creditCents = Math.min(dto.useCreditCents ?? 0, totalCents - exchangeCents);
+    const dueCents = totalCents - exchangeCents - creditCents;
+    const paymentMethod: Sale['paymentMethod'] = dueCents > 0 ? dto.paymentMethod : exchangeCents > 0 ? 'exchange' : creditCents > 0 ? 'credit' : dto.paymentMethod;
+    const isFiado = paymentMethod === 'fiado';
+
+    const cash = cashChange(paymentMethod, dueCents, dueCents > 0 ? dto.cashReceivedCents : null); // valor recebido x o que falta pagar
+
+    // Taxa de 0,5% + teto de R$ 40 sobre o dinheiro novo: se bloqueado, lança 402 e a transação inteira é desfeita.
+    const feeCents = dueCents > 0 ? await this.billingService.applyFee(enterpriseId, saleId, dueCents, session) : 0;
+    if (isFiado) await this.customerService.increaseDebit(enterpriseId, dto.customerId!, dueCents, session);
+    if (creditCents > 0) await this.customerService.spendCredit(enterpriseId, dto.customerId!, creditCents, { saleId, by: opts.staff ?? null }, session);
+
+    const [created] = await this.saleModel.create(
+      [
+        {
+          _id: saleId,
+          enterpriseId,
+          customerId: dto.customerId ?? null,
+          paymentMethod,
+          items,
+          totalCents,
+          ...(discountCents > 0 ? { subtotalCents, discountCents, discount: { mode: dto.discount!.mode, value: dto.discount!.value, ...(dto.discount!.reason?.trim() ? { reason: dto.discount!.reason.trim() } : {}) } } : {}),
+          ...(creditCents > 0 ? { creditCents } : {}),
+          ...(opts.exchange ? { exchangeId: opts.exchange.id, exchangeCents } : {}),
+          feeCents,
+          ...cash,
+          ...(opts.payment ? { payment: opts.payment } : {}),
+          ...(opts.staff ? { staff: { id: new Types.ObjectId(opts.staff.id), name: opts.staff.name } } : {}),
+          ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
+        },
+      ],
+      { session },
+    );
+    return created;
   }
 
   async list(
@@ -193,6 +222,7 @@ export class SaleService {
     if (!opts.fromOrder) {
       const s0 = await this.saleModel.findOne({ _id: id, enterpriseId });
       if (s0?.channel === 'online') throw new ConflictException('Venda da loja online: cancele pelo pedido, em Pedidos.');
+      if (s0?.exchangeId) throw new ConflictException({ statusCode: 409, code: 'SALE_FROM_EXCHANGE', message: 'Esta venda saiu de uma troca. Para desfazer, faça uma nova troca dentro do prazo.' });
     }
     const run = async (session: ClientSession) => {
         const sale = await this.saleModel.findOneAndUpdate(
@@ -211,8 +241,13 @@ export class SaleService {
           if (item.stockTracked === false) continue; // estoque ilimitado: nada a repor
           await this.productService.increaseQuantity(enterpriseId, String(item.productId), item.quantity, session);
         }
+        const paidBefore = (sale.creditCents ?? 0) + (sale.exchangeCents ?? 0);
         if (sale.paymentMethod === 'fiado' && sale.customerId) {
-          await this.customerService.reduceDebitUpTo(enterpriseId, String(sale.customerId), sale.totalCents, session);
+          await this.customerService.reduceDebitUpTo(enterpriseId, String(sale.customerId), sale.totalCents - paidBefore, session);
+        }
+        // Crédito da loja usado nesta venda volta para o cliente.
+        if ((sale.creditCents ?? 0) > 0 && sale.customerId) {
+          await this.customerService.addCredit(enterpriseId, String(sale.customerId), sale.creditCents!, { kind: 'estorno', saleId: sale._id }, session);
         }
         const reversed = await this.billingService.reverseFee(enterpriseId, sale._id, session);
         if (reversed) {

@@ -50,4 +50,16 @@ describe('fechamento de caixa', () => {
     expect(s.topProducts[0]).toEqual({ name: 'Café', quantity: 3, totalCents: 1500 });
     expect(s.sales.items).toBe(6);
   });
+
+  it('troca: venda paga com crédito/troca não entra como dinheiro; devolução em dinheiro sai da gaveta', () => {
+    const s = daySummary('2026-11-14', [
+      sale({ paymentMethod: 'cash', totalCents: 10000, exchangeCents: 6000 }),
+      sale({ paymentMethod: 'credit', totalCents: 3000, creditCents: 3000 }),
+      sale({ paymentMethod: 'pix', totalCents: 5000, creditCents: 1000 }),
+    ], [], 2000, [{ returnedCents: 8000, refundCents: 1500, refundMethod: 'cash', creditCents: 0 }, { returnedCents: 4000, refundCents: 0, refundMethod: null, creditCents: 4000 }]);
+    expect(s.drawer.find((d) => d.method === 'cash')).toMatchObject({ salesCents: 4000, refundCents: 1500, totalCents: 2500 });
+    expect(s.drawer.find((d) => d.method === 'pix')).toMatchObject({ salesCents: 4000 });
+    expect(s.cash.expectedCents).toBe(2000 + 4000 - 1500);
+    expect(s.exchanges).toEqual({ count: 2, returnedCents: 12000, refundCents: 1500, creditCents: 4000 });
+  });
 });

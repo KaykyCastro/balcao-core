@@ -8,6 +8,7 @@ import { CustomerSchema, CustomerSchemaFactory } from '../customer/schema/custom
 import { PromotionModule } from '../promotion/promotion.module';
 import { CustomerPayment, CustomerPaymentSchemaFactory } from '../customer/schema/customer-payment.schema';
 import { CashClosing, CashClosingSchemaFactory } from './schema/cash-closing.schema';
+import { Exchange, ExchangeSchema } from '../exchange/schema/exchange.schema';
 import { CashCloseController } from './cash-close.controller';
 import { CashCloseService } from './cash-close.service';
 
@@ -18,6 +19,7 @@ import { CashCloseService } from './cash-close.service';
     { name: CustomerSchema.name, schema: CustomerSchemaFactory },
     { name: CustomerPayment.name, schema: CustomerPaymentSchemaFactory },
     { name: CashClosing.name, schema: CashClosingSchemaFactory },
+    { name: Exchange.name, schema: ExchangeSchema },
   ])],
   controllers: [ReportController, CashCloseController],
   providers: [ReportService, CashCloseService],

@@ -31,14 +31,21 @@ export type DrawerMethod = (typeof DRAWER_METHODS)[number];
 
 export interface DaySale {
   paymentMethod: string; status: 'completed' | 'cancelled'; totalCents: number; discountCents?: number;
+  /** Parte paga com crédito da loja / com o valor de uma troca: não é dinheiro que entrou no caixa. */
+  creditCents?: number; exchangeCents?: number;
   createdAt: Date; staff?: { name?: string } | null; items?: { productName: string; quantity: number; totalCents: number }[];
 }
 export interface DayPayment { method: string; amountCents: number }
+/** Troca do dia: o que voltou em dinheiro (sai do caixa), o crédito dado e o valor devolvido. */
+export interface DayExchange { returnedCents: number; refundCents: number; refundMethod: string | null; creditCents: number }
+
+/** Dinheiro que de fato entrou por esta venda (o total menos crédito da loja e valor de troca). */
+export const receivedOf = (s: Pick<DaySale, 'totalCents' | 'creditCents' | 'exchangeCents'>) => Math.max(0, s.totalCents - (s.creditCents ?? 0) - (s.exchangeCents ?? 0));
 
 const zero = (): Record<DrawerMethod, number> => ({ cash: 0, pix: 0, card: 0, other: 0 });
 const isDrawer = (m: string): m is DrawerMethod => (DRAWER_METHODS as readonly string[]).includes(m);
 
-export function daySummary(day: string, sales: DaySale[], payments: DayPayment[], openingCents = 0) {
+export function daySummary(day: string, sales: DaySale[], payments: DayPayment[], openingCents = 0, exchanges: DayExchange[] = []) {
   const done = sales.filter((s) => s.status === 'completed');
   const cancelled = sales.filter((s) => s.status === 'cancelled');
   const revenue = done.reduce((a, s) => a + s.totalCents, 0);
@@ -46,14 +53,17 @@ export function daySummary(day: string, sales: DaySale[], payments: DayPayment[]
   const salesBy = zero(); const salesCount = zero();
   let online = 0, onlineCount = 0, fiado = 0, fiadoCount = 0;
   for (const s of done) {
-    if (isDrawer(s.paymentMethod)) { salesBy[s.paymentMethod] += s.totalCents; salesCount[s.paymentMethod] += 1; }
+    if (isDrawer(s.paymentMethod)) { salesBy[s.paymentMethod] += receivedOf(s); salesCount[s.paymentMethod] += 1; }
     else if (s.paymentMethod === 'online') { online += s.totalCents; onlineCount += 1; }
     else if (s.paymentMethod === 'fiado') { fiado += s.totalCents; fiadoCount += 1; }
   }
   const receivedBy = zero();
   for (const p of payments) if (isDrawer(p.method)) receivedBy[p.method] += p.amountCents;
 
-  const drawer = DRAWER_METHODS.map((m) => ({ method: m, salesCents: salesBy[m], salesCount: salesCount[m], fiadoCents: receivedBy[m], totalCents: salesBy[m] + receivedBy[m] }));
+  // Devoluções em dinheiro/Pix/cartão (trocas): saem do caixa daquela forma.
+  const refundBy = zero();
+  for (const x of exchanges) if (x.refundCents > 0) refundBy[isDrawer(x.refundMethod ?? '') ? (x.refundMethod as DrawerMethod) : 'other'] += x.refundCents;
+  const drawer = DRAWER_METHODS.map((m) => ({ method: m, salesCents: salesBy[m], salesCount: salesCount[m], fiadoCents: receivedBy[m], refundCents: refundBy[m], totalCents: salesBy[m] + receivedBy[m] - refundBy[m] }));
   const drawerTotal = drawer.reduce((a, x) => a + x.totalCents, 0);
 
   const staff = new Map<string, { count: number; totalCents: number }>();
@@ -81,7 +91,9 @@ export function daySummary(day: string, sales: DaySale[], payments: DayPayment[]
     drawer, drawerTotalCents: drawerTotal,
     online: { count: onlineCount, totalCents: online },
     fiado: { soldCount: fiadoCount, soldCents: fiado, receivedCents: payments.filter((p) => isDrawer(p.method)).reduce((a, p) => a + p.amountCents, 0), receivedCount: payments.length },
-    cash: { openingCents, salesCents: salesBy.cash, fiadoCents: receivedBy.cash, expectedCents: openingCents + salesBy.cash + receivedBy.cash },
+    cash: { openingCents, salesCents: salesBy.cash, fiadoCents: receivedBy.cash, refundCents: refundBy.cash, expectedCents: openingCents + salesBy.cash + receivedBy.cash - refundBy.cash },
+    /** Trocas do dia: quantas, valor devolvido, quanto voltou em dinheiro e quanto virou crédito. */
+    exchanges: { count: exchanges.length, returnedCents: exchanges.reduce((a, x) => a + x.returnedCents, 0), refundCents: exchanges.reduce((a, x) => a + x.refundCents, 0), creditCents: exchanges.reduce((a, x) => a + x.creditCents, 0) },
     byStaff: [...staff].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.totalCents - a.totalCents),
     byHour: [...hours].map(([hour, v]) => ({ hour, ...v })).sort((a, b) => a.hour - b.hour),
     topProducts: [...products].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.totalCents - a.totalCents).slice(0, 5),

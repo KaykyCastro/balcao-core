@@ -87,6 +87,12 @@ export class CustomerController {
     return this.customerService.listPayments(eid, id);
   }
 
+  /** Extrato do crédito da loja (sobras de troca, usos e estornos). */
+  @Get(':id/credits')
+  listCredits(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) {
+    return this.customerService.listCredits(eid, id);
+  }
+
   /** Convida a pessoa do marketplace a ligar a conta a este cadastro; ela aceita em "Minha conta". */
   @Post(':id/invite')
   invite(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: LinkShopperDto) {

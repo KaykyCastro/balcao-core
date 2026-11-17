@@ -8,6 +8,7 @@ import { Shopper, ShopperSchemaFactory } from '../shopper/schema/shopper.schema'
 import { CustomerLinkRequest, CustomerLinkRequestSchemaFactory } from './schema/link-request.schema';
 import { CustomerInviteCode, CustomerInviteCodeSchemaFactory } from './schema/invite-code.schema';
 import { MessagesModule } from '../messages/messages.module';
+import { CustomerCredit, CustomerCreditSchema } from './schema/customer-credit.schema';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { MessagesModule } from '../messages/messages.module';
       { name: Shopper.name, schema: ShopperSchemaFactory },
       { name: CustomerLinkRequest.name, schema: CustomerLinkRequestSchemaFactory },
       { name: CustomerInviteCode.name, schema: CustomerInviteCodeSchemaFactory },
+      { name: CustomerCredit.name, schema: CustomerCreditSchema },
     ]),
     MessagesModule,
   ],

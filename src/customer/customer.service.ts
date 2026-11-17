@@ -11,6 +11,7 @@ import { ClientSession, Connection, QueryFilter, Model } from 'mongoose';
 
 import { CustomerSchema, CustomerDocument } from './schema/customer.schema';
 import { CustomerPayment } from './schema/customer-payment.schema';
+import { CustomerCredit } from './schema/customer-credit.schema';
 import { CustomerCreateDto } from './dto/customer-create.dto';
 import { CustomerUpdateDto } from './dto/customer-update.dto';
 import { CustomerPaymentDto } from './dto/customer-payment.dto';
@@ -37,6 +38,7 @@ export class CustomerService {
     @Optional() private readonly messages?: MessagesService,
     @Optional() private readonly mail?: MailService,
     @Optional() private readonly config?: ConfigService,
+    @Optional() @InjectModel(CustomerCredit.name) private readonly creditModel?: Model<CustomerCredit>,
   ) {}
 
   // ------------------------------------------------------------------ avisos (nunca derrubam a ação)
@@ -433,8 +435,46 @@ export class CustomerService {
     }
   }
 
+  // ------------------------------------------------------------------ crédito da loja (trocas)
+
+  /** Soma crédito ao cliente (sobra de troca ou estorno) e grava no extrato. Dentro da transação de quem chama. */
+  async addCredit(enterpriseId: string, id: string, cents: number, ref: { kind: 'troca' | 'estorno'; exchangeId?: Types.ObjectId | null; saleId?: Types.ObjectId | null; by?: { id?: string; name: string } | null }, session?: ClientSession) {
+    if (!Number.isInteger(cents) || cents <= 0) return null;
+    const c = await this.customerModel.findOneAndUpdate({ _id: id, enterpriseId }, { $inc: { creditCents: cents } }, { returnDocument: 'after', session });
+    if (!c) throw new NotFoundException('Cliente não encontrado');
+    await this.creditModel?.create([{ enterpriseId, customerId: c._id, kind: ref.kind, amountCents: cents, balanceAfterCents: c.creditCents, exchangeId: ref.exchangeId ?? null, saleId: ref.saleId ?? null, by: byOf(ref.by) }], { session });
+    return c;
+  }
+
+  /**
+   * Usa crédito do cliente numa venda (atômico: nunca deixa o saldo negativo, nem com duas vendas ao mesmo tempo).
+   * 409 CREDIT_NOT_ENOUGH se o saldo não cobre o valor pedido.
+   */
+  async spendCredit(enterpriseId: string, id: string, cents: number, ref: { saleId: Types.ObjectId; by?: { id?: string; name: string } | null }, session?: ClientSession) {
+    if (!Number.isInteger(cents) || cents <= 0) return null;
+    const c = await this.customerModel.findOneAndUpdate({ _id: id, enterpriseId, creditCents: { $gte: cents } }, { $inc: { creditCents: -cents } }, { returnDocument: 'after', session });
+    if (!c) {
+      if (!(await this.customerModel.exists({ _id: id, enterpriseId }).session(session ?? null))) throw new NotFoundException('Cliente não encontrado');
+      throw new ConflictException({ statusCode: 409, code: 'CREDIT_NOT_ENOUGH', message: 'O crédito do cliente não cobre esse valor. Atualize a tela e tente de novo.' });
+    }
+    await this.creditModel?.create([{ enterpriseId, customerId: c._id, kind: 'uso', amountCents: -cents, balanceAfterCents: c.creditCents, exchangeId: null, saleId: ref.saleId, by: byOf(ref.by) }], { session });
+    return c;
+  }
+
+  /** Extrato do crédito do cliente (mais recentes primeiro). */
+  async listCredits(enterpriseId: string, id: string) {
+    await this.getCustomerById(enterpriseId, id);
+    return this.creditModel ? this.creditModel.find({ enterpriseId, customerId: id }).sort({ createdAt: -1 }).limit(300).lean() : [];
+  }
+
   async listPayments(enterpriseId: string, id: string) {
     await this.getCustomerById(enterpriseId, id);
     return this.paymentModel.find({ enterpriseId, customerId: id }).sort({ createdAt: -1 }).limit(200);
   }
+}
+
+/** Quem fez o movimento de crédito (colaborador ou o dono). */
+function byOf(by?: { id?: string; name: string } | null) {
+  if (!by) return { name: 'Dono' };
+  return { ...(by.id && Types.ObjectId.isValid(by.id) ? { id: new Types.ObjectId(by.id) } : {}), name: by.name.slice(0, 80) };
 }

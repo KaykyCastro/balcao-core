@@ -19,6 +19,10 @@ export class CustomerSchema {
   @Prop({ required: true, default: 0, min: 0 })
   debitCents: number;
 
+  /** Crédito da loja (sobra de troca), em centavos: o cliente usa para pagar compras no balcão. Extrato em customer_credits. */
+  @Prop({ default: 0, min: 0 })
+  creditCents: number;
+
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'EnterpriseSchema', required: true, index: true })
   enterpriseId: Types.ObjectId;
 
