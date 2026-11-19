@@ -63,6 +63,26 @@ export class EnterpriseService {
     }
   }
 
+  /**
+   * Filiais: o layout do sistema é um só para o grupo e fica na matriz (cores do painel, logo, layout da tela de
+   * vendas e comprovante, limite de desconto dos colaboradores). Devolve o id de quem guarda esse layout.
+   */
+  async layoutOwner(id: string): Promise<string> {
+    const e = await this.enterpriseModel.findById(id).select('parentId').lean();
+    return e?.parentId ? String(e.parentId) : id;
+  }
+
+  /** Campos do layout compartilhado, lidos da matriz quando `e` é uma filial (para /auth/me e GET /enterprise/:id). */
+  async sharedLayout(e: { parentId?: unknown }): Promise<{ logo?: string; panelTheme?: unknown; staffMaxDiscountBps?: number } | null> {
+    if (!e.parentId) return null;
+    const root = await this.enterpriseModel.findById(e.parentId).select('logo panelTheme staffMaxDiscountBps').lean();
+    return root ? { logo: root.logo ?? '', panelTheme: root.panelTheme ?? null, staffMaxDiscountBps: root.staffMaxDiscountBps } : null;
+  }
+
+  private branchLayoutLocked(): never {
+    throw new ConflictException({ statusCode: 409, code: 'BRANCH_LAYOUT_ROOT', message: 'O layout é o mesmo em todas as lojas do grupo e é editado na matriz. Entre na matriz para mudar.' });
+  }
+
   async findEnterpriseById(id: string): Promise<EnterpriseDocument> {
     const enterprise = await this.enterpriseModel.findById(id);
     if (!enterprise) throw new NotFoundException('Empresa não encontrada');
@@ -75,7 +95,8 @@ export class EnterpriseService {
   }
 
   findByEmailForLogin(email: string): Promise<EnterpriseDocument | null> {
-    return this.enterpriseModel.findOne({ email: email.trim().toLowerCase() }).select('+password +failedLogins +lockUntil +tokenVersion');
+    // Filial não tem login próprio (entra pela troca de loja da matriz).
+    return this.enterpriseModel.findOne({ email: email.trim().toLowerCase(), parentId: null }).select('+password +failedLogins +lockUntil +tokenVersion');
   }
 
   // ---------------------------------------------------------------- perfil
@@ -92,6 +113,7 @@ export class EnterpriseService {
       }
     }
 
+    if (current.parentId && (dto.logo !== undefined || dto.panelTheme !== undefined || dto.staffMaxDiscountBps !== undefined)) this.branchLayoutLocked();
     const set: Record<string, unknown> = {};
     if (dto.name !== undefined) set.name = dto.name;
     if (dto.logo !== undefined) set.logo = await this.storage.resolve(id, 'logo', dto.logo);
@@ -124,15 +146,16 @@ export class EnterpriseService {
   // ---------------------------------------------------------------- layout da tela de vendas
 
   async getPdvLayout(id: string): Promise<{ layout: PdvLayoutData | null; updatedAt: Date | null }> {
-    const e = await this.enterpriseModel.findById(id).select('+pdvLayout pdvLayoutUpdatedAt').lean();
+    const e = await this.enterpriseModel.findById(await this.layoutOwner(id)).select('+pdvLayout pdvLayoutUpdatedAt').lean();
     if (!e) throw new NotFoundException('Empresa não encontrada');
     return { layout: (e.pdvLayout as PdvLayoutData) ?? null, updatedAt: e.pdvLayoutUpdatedAt ?? null };
   }
 
   /** Só o dono grava. A logo em data URL vai para o armazenamento; a antiga sai se ninguém mais usa. */
   async setPdvLayout(id: string, raw: unknown): Promise<{ layout: PdvLayoutData; updatedAt: Date }> {
-    const current = await this.enterpriseModel.findById(id).select('+pdvLayout logo').lean();
+    const current = await this.enterpriseModel.findById(id).select('+pdvLayout logo parentId').lean();
     if (!current) throw new NotFoundException('Empresa não encontrada');
+    if (current.parentId) this.branchLayoutLocked();
     const layout = sanitizePdvLayout(raw);
     const oldLogo = (current.pdvLayout as PdvLayoutData | null)?.logo as string | null | undefined;
     if (typeof layout.logo === 'string') layout.logo = (await this.storage.resolve(id, 'logo', layout.logo)) || null;
@@ -158,6 +181,9 @@ export class EnterpriseService {
    * (5 erros → 15 min bloqueado), para a tela do caixa não virar um jeito de adivinhar a senha sem limite.
    */
   async verifyOwnerPassword(id: string, password: string): Promise<void> {
+    // Numa filial, o dono é o da matriz: confere a senha (e a trava de tentativas) da matriz.
+    const parent = await this.enterpriseModel.findById(id).select('parentId').lean();
+    if (parent?.parentId) id = String(parent.parentId);
     const e = await this.enterpriseModel.findById(id).select('+password +lockUntil +failedLogins');
     if (!e) throw new NotFoundException('Empresa não encontrada');
     if (e.lockUntil && e.lockUntil > new Date()) {
@@ -168,6 +194,16 @@ export class EnterpriseService {
       throw new ForbiddenException({ statusCode: 403, code: 'OWNER_PASSWORD_WRONG', message: 'Senha do dono incorreta. (Conta criada pelo Google? Defina uma senha em "Esqueci a senha" na tela de entrar.)' });
     }
     if ((e.failedLogins ?? 0) > 0) await this.enterpriseModel.updateOne({ _id: id }, { $set: { failedLogins: 0 } });
+  }
+
+  /** Lojas do grupo (matriz + filiais) para a troca de loja no painel. */
+  async groupOf(id: string): Promise<{ id: string; name: string; isRoot: boolean }[]> {
+    const me = await this.enterpriseModel.findById(id).select('parentId').lean();
+    if (!me) return [];
+    const root = me.parentId ?? me._id;
+    const rows = await this.enterpriseModel.find({ $or: [{ _id: root }, { parentId: root }] }).select('name parentId createdAt').sort({ createdAt: 1 }).lean();
+    if (rows.length < 2) return [];
+    return rows.map((r) => ({ id: String(r._id), name: r.name, isRoot: !r.parentId })).sort((a, b) => Number(b.isRoot) - Number(a.isRoot));
   }
 
   async revokeAllSessions(id: string): Promise<void> {
@@ -193,7 +229,11 @@ export class EnterpriseService {
     const enterprise = await this.enterpriseModel.findById(id).select('+password');
     if (!enterprise) throw new NotFoundException('Empresa não encontrada');
     if (enterprise.role === 'admin') throw new ForbiddenException('Contas de administrador não podem ser excluídas por aqui');
-    if (!(await bcrypt.compare(password, enterprise.password))) throw new ForbiddenException('Senha incorreta');
+    const owner = enterprise.parentId ? await this.enterpriseModel.findById(enterprise.parentId).select('+password') : enterprise;
+    if (!owner || !(await bcrypt.compare(password, owner.password))) throw new ForbiddenException('Senha incorreta');
+    if (!enterprise.parentId && (await this.enterpriseModel.exists({ parentId: enterprise._id }))) {
+      throw new ConflictException({ statusCode: 409, code: 'HAS_BRANCHES', message: 'Esta empresa tem filiais. Exclua as filiais antes (entre em cada uma e exclua em Configurações).' });
+    }
     if ((enterprise.debtCents ?? 0) > 0) throw new ConflictException({ statusCode: 409, code: 'DEBT_OPEN', message: 'Existe taxa do Balcão em aberto. Quite antes de excluir a conta.' });
     const orders = this.connection.models.Order;
     const open = orders ? await orders.countDocuments({ enterpriseId: enterprise._id, status: { $in: [...OPEN_ORDER_STATUSES] } }) : 0;
@@ -289,7 +329,7 @@ export class EnterpriseService {
 
   async setResetToken(email: string, hash: string, expires: Date): Promise<EnterpriseDocument | null> {
     return this.enterpriseModel.findOneAndUpdate(
-      { email: email.trim().toLowerCase(), status: 'active' },
+      { email: email.trim().toLowerCase(), status: 'active', parentId: null },
       { $set: { passwordResetHash: hash, passwordResetExpires: expires } },
       { returnDocument: 'after' },
     );

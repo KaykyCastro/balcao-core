@@ -42,6 +42,9 @@ const RULES: Rule[] = [
   { re: /^\/customer(\/.*)?$/, read: ['sales', 'customers'], write: ['customers'] },
   // Trocas e devoluções no balcão: quem vende também troca (o prazo e os limites são conferidos na API).
   { re: /^\/exchanges(\/.*)?$/, read: ['sales'], write: ['sales'] },
+  { re: /^\/sales-overview$/, read: ['sales', 'reports'], write: [] },
+  // Filiais: só o dono, menos a busca de produto entre lojas ("tem na outra loja?").
+  { re: /^\/branches\/products$/, read: ['sales', 'stock'], write: [] },
   // salão e loja online
   { re: /^\/tabs(\/.*)?$/, read: ['tables'], write: ['tables'] },
   { re: /^\/orders\/summary$/, read: ['orders', 'tables'] },

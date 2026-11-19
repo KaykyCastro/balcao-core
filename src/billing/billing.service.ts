@@ -14,6 +14,8 @@ import { FEE_RATE_BPS, calcFeeCents, graceDays } from './billing.constants';
 import { SettingsService } from '../settings/settings.service';
 import { dueDateFrom, feeWaived, freeMonthProblem, inTrial, isFreeMonth, trialDaysLeft, trialEnd } from './billing.rules';
 import { nextMonthStart, periodOf } from '../common/period';
+import { FEE_TIERS, feeForSale, monthCapCents, settleMonth, tierFor, tiersFrom } from './fee-tiers';
+import { isDuplicateKeyError } from '../common/mongo';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
 
 export interface PaidInfo { via: 'mercadopago' | 'manual'; paymentId?: string; method?: string; paidAmountCents?: number; note?: string }
@@ -33,9 +35,33 @@ export class BillingService {
     private readonly settings: SettingsService,
   ) {}
 
-  /** Teto mensal desta empresa: o dela, se o admin definiu; senão o padrão da plataforma. */
-  private async capFor(enterprise: { feeCapCents?: number | null }): Promise<number> {
-    return enterprise.feeCapCents ?? (await this.settings.policy()).capCents;
+  /**
+   * Teto do mês de uma empresa, em função do total vendido no mês (fee-tiers.ts): o teto negociado pelo admin, se
+   * houver; senão a faixa de faturamento (a partir de BILLING_TIERS_FROM) ou o teto fixo da plataforma (meses antes).
+   * Teto da plataforma 0 = ninguém paga taxa.
+   */
+  private async capFn(enterprise: { feeCapCents?: number | null }, period: string): Promise<(baseCents: number) => number> {
+    const policy = await this.settings.policy();
+    const negotiated = enterprise.feeCapCents ?? null;
+    const fixed = negotiated == null && (policy.capCents === 0 || period < tiersFrom(this.config.get('BILLING_TIERS_FROM'))) ? policy.capCents : null;
+    return (base) => monthCapCents(base, { negotiated, fixed });
+  }
+
+  /** Totais do BALCÃO no mês (sem as estornadas): vendido, 0,5% cheio, cobrado e cobrado ainda sem fatura. */
+  private async monthTotals(enterpriseId: string, period: string, session?: ClientSession) {
+    const [agg] = await this.feeModel
+      .aggregate<{ base: number; raw: number; charged: number; unbilled: number }>([
+        { $match: { enterpriseId: new Types.ObjectId(enterpriseId), period, reversedAt: null, channel: { $ne: 'online' } } },
+        { $group: {
+          _id: null,
+          base: { $sum: { $cond: [{ $eq: ['$kind', 'adjust'] }, 0, '$baseCents'] } },
+          raw: { $sum: { $cond: [{ $eq: ['$kind', 'adjust'] }, 0, { $ifNull: ['$rawFeeCents', '$feeCents'] }] } },
+          charged: { $sum: '$feeCents' },
+          unbilled: { $sum: { $cond: [{ $eq: ['$invoiceId', null] }, '$feeCents', 0] } },
+        } },
+      ])
+      .session(session ?? null);
+    return { baseCents: agg?.base ?? 0, rawCents: agg?.raw ?? 0, chargedCents: agg?.charged ?? 0, unbilledCents: agg?.unbilled ?? 0 };
   }
 
   // ------------------------------------------------------------------ taxa por venda
@@ -44,7 +70,8 @@ export class BillingService {
    * Cobra 0,5% da venda. Chamar DENTRO da transação da venda.
    * - Teste grátis (30 dias), empresa isenta ou admin: não cobra nada.
    * - Conta bloqueada por fatura vencida -> 402 BILLING_BLOCKED
-   * - Teto de R$ 40 POR MÊS: a venda que cruza o teto cobra só o que falta; depois disso passa sem taxa.
+   * - Teto POR MÊS pela faixa do total vendido no mês (fee-tiers.ts): depois do teto a venda passa sem taxa; a venda
+   *   que leva o mês para a faixa seguinte cobra a diferença do teto. O fechamento acerta o mês inteiro.
    * Retorna a taxa efetivamente cobrada, em centavos.
    */
   async applyFee(enterpriseId: string, saleId: Types.ObjectId, saleTotalCents: number, session: ClientSession, opts: { allowBlocked?: boolean } = {}): Promise<number> {
@@ -58,12 +85,12 @@ export class BillingService {
 
     const period = periodOf();
     if (isFreeMonth(enterprise, period)) return 0; // mês grátis dado pelo admin
-    const soFar = await this.monthFeeCents(enterpriseId, period, session);
-    const applied = Math.min(calcFeeCents(saleTotalCents), Math.max(0, (await this.capFor(enterprise)) - soFar));
-    if (applied > 0) {
-      await this.enterpriseService.addDebt(enterpriseId, applied, session);
-      await this.feeModel.create([{ enterpriseId, saleId, baseCents: saleTotalCents, rateBps: FEE_RATE_BPS, feeCents: applied, period }], { session });
-    }
+    const cap = await this.capFn(enterprise, period);
+    const month = await this.monthTotals(enterpriseId, period, session);
+    const { rawCents, feeCents: applied } = feeForSale(month, saleTotalCents, cap);
+    if (applied > 0) await this.enterpriseService.addDebt(enterpriseId, applied, session);
+    // Toda venda do balcão fica registrada, mesmo com taxa 0: o total vendido define a faixa do teto do mês.
+    await this.feeModel.create([{ enterpriseId, saleId, baseCents: saleTotalCents, rateBps: FEE_RATE_BPS, feeCents: applied, rawFeeCents: rawCents, kind: 'sale', period }], { session });
     return applied;
   }
 
@@ -125,17 +152,6 @@ export class BillingService {
     return agg?.sum ?? 0;
   }
 
-  /** Taxa do BALCÃO já cobrada no mês (sem as estornadas). É a que conta para o teto. */
-  private async monthFeeCents(enterpriseId: string, period: string, session?: ClientSession): Promise<number> {
-    const [agg] = await this.feeModel
-      .aggregate<{ sum: number }>([
-        { $match: { enterpriseId: new Types.ObjectId(enterpriseId), period, reversedAt: null, channel: { $ne: 'online' } } },
-        { $group: { _id: null, sum: { $sum: '$feeCents' } } },
-      ])
-      .session(session ?? null);
-    return agg?.sum ?? 0;
-  }
-
   /** Taxa ainda não faturada (de qualquer mês), sem as estornadas. */
   private async unbilledCents(enterpriseId: string): Promise<number> {
     const [agg] = await this.feeModel.aggregate<{ sum: number }>([
@@ -162,14 +178,20 @@ export class BillingService {
   async getSummary(enterpriseId: string) {
     const enterprise = await this.enterpriseService.findEnterpriseById(enterpriseId);
     const pending = await this.invoiceModel.find({ enterpriseId, status: 'pending' }).sort({ dueDate: 1 });
-    const monthFeeCents = await this.monthFeeCents(enterpriseId, periodOf());
+    const period = periodOf();
+    const totals = await this.monthTotals(enterpriseId, period);
+    const monthFeeCents = totals.chargedCents;
     const onlineMonthFeeCents = await this.monthOnlineFeeCents(enterpriseId, periodOf());
     const unbilled = await this.unbilledCents(enterpriseId);
     const waived = feeWaived(enterprise);
     const blocked = enterprise.billing?.status === 'blocked';
     const policy = await this.settings.policy();
-    const cap = enterprise.feeCapCents ?? policy.capCents;
+    // Teto do mês pela faixa do que já foi vendido no mês (fee-tiers.ts); muda conforme o mês anda.
+    const cap = (await this.capFn(enterprise, period))(totals.baseCents);
     const capReached = cap > 0 && monthFeeCents >= cap;
+    const tiered = enterprise.feeCapCents == null && policy.capCents !== 0 && period >= tiersFrom(this.config.get('BILLING_TIERS_FROM'));
+    const tier = tiered ? tierFor(totals.baseCents) : null;
+    const next = tier && FEE_TIERS[tier.index + 1] ? { fromCents: tier.upToCents! + 1, capCents: FEE_TIERS[tier.index + 1].capCents } : null;
     return {
       // Taxa do MÊS ATUAL: vai acumulando até o teto e vira fatura no começo do mês seguinte (com 15 dias para pagar).
       // Não depende de a fatura do mês anterior já ter sido paga: as duas convivem.
@@ -178,6 +200,8 @@ export class BillingService {
         feeCents: monthFeeCents,
         capCents: cap,
         capReached,
+        salesCents: totals.baseCents, // vendido no balcão no mês (define a faixa)
+        tier: tier ? { index: tier.index, upToCents: tier.upToCents, next } : null,
         onlineFeeCents: onlineMonthFeeCents, // loja online: já descontada pelo Mercado Pago (informativo)
         unbilledCents: unbilled,
         closesAt: nextMonthStart(),
@@ -186,7 +210,8 @@ export class BillingService {
       },
       pendingCents: pending.reduce((n, i) => n + i.amountCents, 0), // faturas já emitidas e não pagas
       rateBps: FEE_RATE_BPS,
-      capCents: cap, // teto POR MÊS (o da empresa, se houver; senão o padrão)
+      capCents: cap, // teto do mês ATUAL (pela faixa do vendido, ou o negociado)
+      tiers: tiered ? FEE_TIERS : null, // faixas dos Termos (null = teto negociado ou fixo)
       policy: { capCents: policy.capCents, trialDays: policy.trialDays, onlineRateBps: policy.onlineRateBps, directoryRateBps: policy.directoryRateBps },
       graceDays: graceDays(this.config.get('BILLING_GRACE_DAYS')),
       debtCents: enterprise.debtCents ?? 0, // total em aberto, inclui meses não pagos
@@ -221,7 +246,8 @@ export class BillingService {
         created = null;
         const invoiceId = new Types.ObjectId();
         const claim = await this.feeModel.updateMany(
-          { enterpriseId, invoiceId: null, reversedAt: null, collected: { $ne: true }, ...(opts.beforePeriod ? { period: { $lt: opts.beforePeriod } } : {}) },
+          // Linhas de taxa 0 (vendas depois do teto) não entram na fatura: só servem para a faixa do mês.
+          { enterpriseId, invoiceId: null, reversedAt: null, collected: { $ne: true }, feeCents: { $ne: 0 }, ...(opts.beforePeriod ? { period: { $lt: opts.beforePeriod } } : {}) },
           { $set: { invoiceId } },
           { session },
         );
@@ -244,11 +270,15 @@ export class BillingService {
     }
   }
 
-  /** Empresa pede para pagar agora (ex.: bateu o teto de R$ 40 no meio do mês). Também tem o prazo normal. */
+  /**
+   * Empresa pede para pagar agora (bateu o teto da faixa atual no meio do mês). Também tem o prazo normal. Se o mês
+   * ainda passar para a faixa seguinte, a diferença vem na fatura do fechamento.
+   */
   async issueInvoiceNow(enterpriseId: string) {
     const enterprise = await this.enterpriseService.findEnterpriseById(enterpriseId);
-    const cap = enterprise.feeCapCents ?? (await this.settings.policy()).capCents;
-    const monthFee = await this.monthFeeCents(enterpriseId, periodOf());
+    const t = await this.monthTotals(enterpriseId, periodOf());
+    const cap = (await this.capFn(enterprise, periodOf()))(t.baseCents);
+    const monthFee = t.chargedCents;
     // A taxa é mensal e não se paga antes do fechamento, exceto quando o teto do mês já foi atingido.
     if (!(cap > 0 && monthFee >= cap)) {
       throw new ConflictException('A taxa do mês só pode ser paga antes do fechamento depois de atingir o teto mensal. Ela vira fatura no começo do próximo mês.');
@@ -300,6 +330,8 @@ export class BillingService {
     }
 
     const enterprise = await this.enterpriseService.findEnterpriseById(enterpriseId);
+    // Filial: o e-mail de contato (pagador) é o da matriz; o da filial é interno.
+    if (enterprise.parentId) enterprise.email = (await this.enterpriseService.findEnterpriseById(String(enterprise.parentId)).catch(() => null))?.email ?? '';
     // CPF/CNPJ do pagador: o da empresa, senão o informado nos dados do vendedor da loja online (melhora a aprovação).
     const legal = ((await this.connection.models.Store?.findOne({ enterpriseId: enterprise._id }).select('legal.document legal.name').lean()) as { legal?: { document?: string; name?: string } } | null)?.legal;
     const sellerDoc = String(legal?.document ?? '');
@@ -553,7 +585,8 @@ export class BillingService {
   async runDailyClose(now: Date = new Date()) {
     const current = periodOf(now);
     const dueDate = dueDateFrom(now, graceDays(this.config.get('BILLING_GRACE_DAYS')));
-    const toInvoice = await crossTenant(this.feeModel, 'rotina: taxas sem fatura de todas as lojas').distinct('enterpriseId', { invoiceId: null, reversedAt: null, collected: { $ne: true }, period: { $lt: current } });
+    await this.settleClosedMonths(current);
+    const toInvoice = await crossTenant(this.feeModel, 'rotina: taxas sem fatura de todas as lojas').distinct('enterpriseId', { invoiceId: null, reversedAt: null, collected: { $ne: true }, feeCents: { $ne: 0 }, period: { $lt: current } });
     for (const id of toInvoice) {
       try {
         const inv = await this.issueInvoice(String(id), { kind: 'monthly', dueDate, beforePeriod: current });
@@ -563,6 +596,56 @@ export class BillingService {
       }
     }
     await this.runBlockCheck(now);
+  }
+
+  /**
+   * Fechamento por faixa: para cada empresa e mês já encerrado (a partir de BILLING_TIERS_FROM) que ainda não foi
+   * acertado, refaz a conta do mês inteiro (0,5% somado × teto da faixa do total vendido) e lança a diferença numa
+   * linha de acerto. Cobra a mais quando o mês cruzou de faixa; devolve (até o que ainda não foi faturado) quando
+   * cancelamentos derrubaram a faixa. Idempotente: uma linha por empresa e mês (`settlementKey`).
+   */
+  async settleClosedMonths(current: string) {
+    const from = tiersFrom(this.config.get('BILLING_TIERS_FROM'));
+    if (from >= current) return;
+    const fees = crossTenant(this.feeModel, 'rotina: acerto mensal das taxas de todas as lojas');
+    const months = await fees.aggregate<{ _id: { e: Types.ObjectId; p: string } }>([
+      { $match: { period: { $gte: from, $lt: current }, channel: { $ne: 'online' }, kind: { $ne: 'adjust' } } },
+      { $group: { _id: { e: '$enterpriseId', p: '$period' } } },
+    ]);
+    if (!months.length) return;
+    const keys = months.map((m) => `${String(m._id.e)}:${m._id.p}`);
+    const done = new Set((await fees.distinct('settlementKey', { settlementKey: { $in: keys } })) as string[]);
+    for (const m of months) {
+      const eid = String(m._id.e), key = `${eid}:${m._id.p}`;
+      if (done.has(key)) continue;
+      try { await this.settleMonth(eid, m._id.p, key); } catch (e) { this.logger.error(`Falha no acerto de ${key}: ${(e as Error).message}`); }
+    }
+  }
+
+  private async settleMonth(eid: string, period: string, key: string) {
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const enterprise = await this.enterpriseService.lockForBilling(eid, session);
+        if (!enterprise) return;
+        const totals = await this.monthTotals(eid, period, session);
+        let { adjustCents } = settleMonth(totals, await this.capFn(enterprise, period));
+        // Empresa isenta ou com o mês dado de graça: nunca cobra a mais no acerto.
+        if (adjustCents > 0 && (enterprise.feeExempt || enterprise.role === 'admin' || isFreeMonth(enterprise, period))) adjustCents = 0;
+        await this.feeModel.create([{
+          enterpriseId: enterprise._id, saleId: new Types.ObjectId(), baseCents: 0, rateBps: FEE_RATE_BPS, feeCents: adjustCents, rawFeeCents: 0,
+          kind: 'adjust', settlementKey: key, period,
+        }], { session });
+        if (adjustCents !== 0) {
+          await this.enterpriseService.addDebt(eid, adjustCents, session);
+          this.logger.log(`Acerto do mês ${period} de ${eid}: ${adjustCents > 0 ? '+' : ''}R$ ${(adjustCents / 100).toFixed(2)} (vendido R$ ${(totals.baseCents / 100).toFixed(2)})`);
+        }
+      });
+    } catch (e) {
+      if (!isDuplicateKeyError(e)) throw e; // outra instância acertou o mesmo mês ao mesmo tempo
+    } finally {
+      await session.endSession();
+    }
   }
 
   // ------------------------------------------------------------------ helpers

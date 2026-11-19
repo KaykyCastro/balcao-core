@@ -13,6 +13,9 @@ import { CashWithdrawal, CashWithdrawalSchema } from './schema/cash-withdrawal.s
 import { EnterprisesModule } from '../enterprise/enterprise.module';
 import { CashCloseController } from './cash-close.controller';
 import { CashCloseService } from './cash-close.service';
+import { SalesOverviewController, SalesOverviewService } from './sales-overview.controller';
+import { CustomerStatementController, CustomerStatementService } from './customer-statement.service';
+import { CustomerCredit, CustomerCreditSchema } from '../customer/schema/customer-credit.schema';
 
 @Module({
   imports: [PromotionModule, MongooseModule.forFeature([
@@ -23,8 +26,9 @@ import { CashCloseService } from './cash-close.service';
     { name: CashClosing.name, schema: CashClosingSchemaFactory },
     { name: Exchange.name, schema: ExchangeSchema },
     { name: CashWithdrawal.name, schema: CashWithdrawalSchema },
+    { name: CustomerCredit.name, schema: CustomerCreditSchema },
   ]), EnterprisesModule],
-  controllers: [ReportController, CashCloseController],
-  providers: [ReportService, CashCloseService],
+  controllers: [ReportController, CashCloseController, SalesOverviewController, CustomerStatementController],
+  providers: [ReportService, CashCloseService, SalesOverviewService, CustomerStatementService],
 })
 export class ReportModule {}

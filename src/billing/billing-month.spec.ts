@@ -14,13 +14,14 @@ describe('virada do mês (Fortaleza)', () => {
 });
 
 describe('BillingService: taxa mensal, sem acúmulo e sem pagar adiantado', () => {
-  const mk = (o: { monthFee?: number; online?: number; unbilled?: number; enterprise?: object; pending?: any[]; cap?: number } = {}) => {
+  const mk = (o: { monthFee?: number; online?: number; unbilled?: number; enterprise?: object; pending?: any[]; cap?: number; sales?: number; tiersFrom?: string } = {}) => {
     const feeModel: any = {
       aggregate: jest.fn((pipeline: any[]) => {
         const isMonth = !!pipeline[0].$match.period;
         const online = pipeline[0].$match.channel === 'online'; // taxa da loja online (fora do teto)
         const sum = online ? o.online ?? 0 : isMonth ? o.monthFee ?? 0 : o.unbilled ?? 0;
-        const res = sum ? [{ sum }] : [];
+        // Mês no balcão: totais (vendido, 0,5% cheio, cobrado); o resto: soma simples.
+        const res = isMonth && !online ? [{ base: o.sales ?? sum * 200, raw: sum, charged: sum, unbilled: sum }] : sum ? [{ sum }] : [];
         return Object.assign(Promise.resolve(res), { session: () => Promise.resolve(res) });
       }),
     };
@@ -30,7 +31,7 @@ describe('BillingService: taxa mensal, sem acúmulo e sem pagar adiantado', () =
     };
     const ents = { findEnterpriseById: jest.fn().mockResolvedValue({ createdAt: new Date(Date.now() - 90 * DAY), billing: { status: 'active' }, debtCents: 0, ...o.enterprise }) };
     const settings = { policy: async () => ({ capCents: o.cap ?? 4000, trialDays: 30 }) };
-    const svc = new BillingService(feeModel, invoiceModel, {} as any, {} as any, ents as any, {} as any, { get: () => undefined } as any, settings as any);
+    const svc = new BillingService(feeModel, invoiceModel, {} as any, {} as any, ents as any, {} as any, { get: (k: string) => (k === 'BILLING_TIERS_FROM' ? o.tiersFrom : undefined) } as any, settings as any);
     return { svc, feeModel, invoiceModel };
   };
 
@@ -74,6 +75,29 @@ describe('BillingService: taxa mensal, sem acúmulo e sem pagar adiantado', () =
     const spy = jest.spyOn(svc, 'issueInvoice').mockResolvedValue({ _id: new Types.ObjectId(), enterpriseId: new Types.ObjectId(), amountCents: 4000, status: 'pending', dueDate: new Date(), kind: 'on_demand', periodFrom: periodOf(), periodTo: periodOf() } as any);
     await expect(svc.issueInvoiceNow(EID)).resolves.toMatchObject({ amountCents: 4000, kind: 'on_demand' });
     expect(spy).toHaveBeenCalledWith(EID, expect.objectContaining({ kind: 'on_demand' }));
+  });
+});
+
+describe('BillingService: resumo com faixas de faturamento', () => {
+  const mk = (sales: number, fee: number, enterprise: object = {}) => {
+    const feeModel: any = { aggregate: jest.fn((p: any[]) => { const r = p[0].$match.period && p[0].$match.channel?.$ne === 'online' ? [{ base: sales, raw: Math.round(sales / 200), charged: fee, unbilled: fee }] : []; return Object.assign(Promise.resolve(r), { session: () => Promise.resolve(r) }); }) };
+    const invoiceModel: any = { find: jest.fn().mockReturnValue({ sort: () => Promise.resolve([]) }) };
+    const ents = { findEnterpriseById: jest.fn().mockResolvedValue({ createdAt: new Date(Date.now() - 90 * DAY), billing: { status: 'active' }, debtCents: 0, ...enterprise }) };
+    return new BillingService(feeModel, invoiceModel, {} as any, {} as any, ents as any, {} as any, { get: (k: string) => (k === 'BILLING_TIERS_FROM' ? '2000-01' : undefined) } as any, { policy: async () => ({ capCents: 4000, trialDays: 30 }) } as any);
+  };
+  it('o teto do mês segue o vendido: R$ 30 mil → teto R$ 100, com a próxima faixa', async () => {
+    const s = await mk(3_000_000, 10_000).getSummary(EID);
+    expect(s.currentMonth).toMatchObject({ capCents: 10_000, capReached: true, salesCents: 3_000_000, tier: { index: 1, upToCents: 5_000_000, next: { fromCents: 5_000_001, capCents: 20_000 } } });
+    expect(s.tiers).toHaveLength(5);
+  });
+  it('mês fraco volta para a 1ª faixa (R$ 40)', async () => {
+    const s = await mk(1_000_000, 4_000).getSummary(EID);
+    expect(s.currentMonth).toMatchObject({ capCents: 4_000, tier: { index: 0 } });
+  });
+  it('teto negociado pelo admin: sem faixas', async () => {
+    const s = await mk(9_000_000, 2_000, { feeCapCents: 2_000 }).getSummary(EID);
+    expect(s.currentMonth).toMatchObject({ capCents: 2_000, tier: null });
+    expect(s.tiers).toBeNull();
   });
 });
 

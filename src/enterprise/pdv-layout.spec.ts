@@ -1,4 +1,4 @@
-import { sanitizePdvLayout } from './pdv-layout.rules';
+import { payOrder, sanitizePdvLayout } from './pdv-layout.rules';
 
 describe('sanitizePdvLayout (layout da tela de vendas compartilhado)', () => {
   it('guarda os campos válidos', () => {
@@ -54,4 +54,10 @@ describe('layout da tela de vendas: acesso do colaborador', () => {
   const path = '/enterprise/0123456789abcdef01234567/pdv-layout';
   it('colaborador lê o layout do dono', () => expect(staffAccess('GET', path, ['sales']).ok).toBe(true));
   it('colaborador não muda o layout', () => expect(staffAccess('PUT', path, ['sales', 'stock', 'reports']).ok).toBe(false));
+
+  it('ordem dos botões de pagamento: só as formas conhecidas, sem repetir, completando as que faltam', () => {
+    expect(payOrder(['fiado', 'pix', 'pix', 'boleto', 7])).toEqual(['fiado', 'pix', 'cash', 'card', 'other']);
+    expect(payOrder('pix')).toBeUndefined();
+    expect(sanitizePdvLayout({ payOrder: ['card', 'cash'] })).toMatchObject({ payOrder: ['card', 'cash', 'pix', 'other', 'fiado'] });
+  });
 });

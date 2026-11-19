@@ -1,5 +1,9 @@
 import { cashChange } from './cash';
-import { BadRequestException, ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional, UnprocessableEntityException } from '@nestjs/common';
+import { EnterpriseService } from '../enterprise/enterprise.service';
+import { judgePaymentEdit, PaymentEditError, dueOf, EDITABLE_METHODS } from './payment-edit.rules';
+import { escapeRegex } from '../common/mongo';
+import { periodRange } from '../common/period';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, QueryFilter, Model, Types } from 'mongoose';
 
@@ -27,6 +31,7 @@ export class SaleService {
     private readonly customerService: CustomerService,
     private readonly billingService: BillingService,
     private readonly promotionService: PromotionService,
+    @Optional() private readonly enterprises?: EnterpriseService,
   ) {}
 
   /**
@@ -36,7 +41,9 @@ export class SaleService {
   /** Teto de desconto do colaborador (pontos-base); null = dono, sem teto. */
   private async staffDiscountCap(enterpriseId: string, staff?: { id: string } | null): Promise<number | null> {
     if (!staff) return null;
-    const e = await this.connection.collection('enterpriseschemas').findOne({ _id: new Types.ObjectId(enterpriseId) }, { projection: { staffMaxDiscountBps: 1 } });
+    const col = this.connection.collection('enterpriseschemas');
+    let e = await col.findOne({ _id: new Types.ObjectId(enterpriseId) }, { projection: { staffMaxDiscountBps: 1, parentId: 1 } });
+    if (e?.parentId) e = await col.findOne({ _id: e.parentId }, { projection: { staffMaxDiscountBps: 1 } }); // filial: o limite é o da matriz
     return typeof e?.staffMaxDiscountBps === 'number' ? e.staffMaxDiscountBps : DEFAULT_STAFF_MAX_DISCOUNT_BPS;
   }
 
@@ -208,6 +215,97 @@ export class SaleService {
     return { items, total, page: q.page, limit: q.limit };
   }
 
+  /**
+   * Lista para a página "Gestão de vendas": período (dia de Brasília), canal, situação, forma e busca por
+   * número do comprovante, cliente, produto ou colaborador. Já vem com o nome do cliente e o que dá para corrigir.
+   */
+  async manage(enterpriseId: string, q: { page: number; limit: number; channel?: 'pos' | 'online'; status?: 'completed' | 'cancelled'; paymentMethod?: string; from?: string; to?: string; search?: string }) {
+    const eid = new Types.ObjectId(enterpriseId);
+    const filter: Record<string, unknown> = { enterpriseId: eid };
+    if (q.channel === 'online') filter.channel = 'online';
+    else if (q.channel === 'pos') filter.channel = { $ne: 'online' };
+    if (q.status) filter.status = q.status;
+    if (q.paymentMethod) filter.paymentMethod = q.paymentMethod;
+    const range = periodRange(q.from, q.to);
+    if (range) filter.createdAt = range;
+    const term = (q.search ?? '').replace(/^\s*n[ºo°]?\s*/i, '').trim().slice(0, 60);
+    if (term) {
+      const rx = { $regex: escapeRegex(term), $options: 'i' };
+      const custIds = (await this.connection.collection('customerschemas').find({ enterpriseId: eid, name: rx }, { projection: { _id: 1 } }).limit(200).toArray()).map((c) => c._id);
+      filter.$or = [
+        ...(/^[0-9a-f]{1,24}$/i.test(term) ? [{ $expr: { $regexMatch: { input: { $toString: '$_id' }, regex: `${escapeRegex(term.toLowerCase())}$` } } }] : []),
+        { 'items.productName': rx }, { 'staff.name': rx },
+        ...(custIds.length ? [{ customerId: { $in: custIds } }] : []),
+      ];
+    }
+    const [rows, total] = await Promise.all([
+      this.saleModel.find(filter).sort({ createdAt: -1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
+      this.saleModel.countDocuments(filter),
+    ]);
+    const ids = [...new Set(rows.map((r) => r.customerId && String(r.customerId)).filter(Boolean) as string[])];
+    const names = new Map(ids.length ? (await this.connection.collection('customerschemas').find({ enterpriseId: eid, _id: { $in: ids.map((x) => new Types.ObjectId(x)) } }, { projection: { name: 1 } }).toArray()).map((c) => [String(c._id), c.name as string]) : []);
+    return {
+      items: rows.map((r) => {
+        let editable: string | null = null;
+        try { judgePaymentEdit(r as never, r.paymentMethod === 'cash' ? 'pix' : 'cash'); } catch (e) { editable = e instanceof PaymentEditError ? e.code : 'PAYMENT_EDIT'; }
+        return { ...r, customerName: r.customerId ? names.get(String(r.customerId)) ?? '' : '', dueCents: dueOf(r), editBlock: editable };
+      }),
+      total, page: q.page, limit: q.limit,
+    };
+  }
+
+  /**
+   * Corrige a forma de pagamento de uma venda do balcão. Motivo obrigatório e SEMPRE a senha do dono (mesmo com um
+   * colaborador logado). Fiado entra/sai da dívida do cliente na mesma transação. Cada correção fica gravada na venda.
+   */
+  async editPayment(enterpriseId: string, id: string, dto: { paymentMethod: string; reason: string; ownerPassword: string }, who: { id: string; name: string } | null) {
+    const reason = (dto.reason ?? '').replace(/\s+/g, ' ').trim();
+    if (reason.length < 3) throw new ConflictException({ statusCode: 409, code: 'PAYMENT_EDIT_REASON', message: 'Explique o motivo da correção (ex.: o cliente pagou em dinheiro, não no Pix).' });
+    const fail = (e: unknown): never => {
+      if (e instanceof PaymentEditError) throw new ConflictException({ statusCode: 409, code: e.code, message: e.message });
+      throw e;
+    };
+    // Confere antes de pedir a senha, para não gastar tentativa numa venda que nem dá para corrigir.
+    const before = await this.saleModel.findOne({ _id: id, enterpriseId }).lean();
+    if (!before) throw new NotFoundException('Venda não encontrada');
+    try { judgePaymentEdit(before as never, dto.paymentMethod); } catch (e) { fail(e); }
+    if (!this.enterprises) throw new ConflictException('Indisponível');
+    await this.enterprises.verifyOwnerPassword(enterpriseId, dto.ownerPassword);
+
+    const session = await this.connection.startSession();
+    try {
+      let out!: SaleDocument;
+      await session.withTransaction(async () => {
+        const sale = await this.saleModel.findOne({ _id: id, enterpriseId }).session(session);
+        if (!sale) throw new NotFoundException('Venda não encontrada');
+        let judged!: ReturnType<typeof judgePaymentEdit>;
+        try { judged = judgePaymentEdit(sale, dto.paymentMethod); } catch (e) { fail(e); }
+        const cust = sale.customerId ? String(sale.customerId) : null;
+        if (judged.debtDelta > 0) {
+          await this.customerService.assertCanOwe(enterpriseId, cust!);
+          await this.customerService.increaseDebit(enterpriseId, cust!, judged.debtDelta, session);
+        } else if (judged.debtDelta < 0 && cust) {
+          const ok = await this.customerService.reduceDebitExact(enterpriseId, cust, -judged.debtDelta, session);
+          if (!ok) throw new ConflictException({ statusCode: 409, code: 'PAYMENT_EDIT_FIADO_PAID', message: 'Parte deste fiado já foi paga pelo cliente. Ajuste pela ficha do cliente em vez de trocar a forma da venda.' });
+        }
+        const from = sale.paymentMethod;
+        const r = await this.saleModel.findOneAndUpdate(
+          { _id: sale._id, enterpriseId, paymentMethod: from, status: 'completed' },
+          {
+            $set: { paymentMethod: dto.paymentMethod, cashReceivedCents: null, changeCents: null },
+            $push: { paymentEdits: { from, to: dto.paymentMethod, reason: reason.slice(0, 200), at: new Date(), by: who ? { name: who.name, staffId: new Types.ObjectId(who.id) } : { name: 'Dono', staffId: null } } },
+          },
+          { returnDocument: 'after', session },
+        );
+        if (!r) throw new ConflictException({ statusCode: 409, code: 'PAYMENT_EDIT_CHANGED', message: 'A venda mudou enquanto você corrigia. Abra de novo e confira.' });
+        out = r;
+      });
+      return out;
+    } finally {
+      await session.endSession();
+    }
+  }
+
   async findById(enterpriseId: string, id: string): Promise<SaleDocument> {
     const sale = await this.saleModel.findOne({ _id: id, enterpriseId });
     if (!sale) throw new NotFoundException('Venda não encontrada');
@@ -322,3 +420,4 @@ export class SaleService {
     return this.saleModel.find({ enterpriseId, customerId, status: 'completed' }).sort({ createdAt: -1 }).limit(limit).lean();
   }
 }
+

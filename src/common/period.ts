@@ -18,3 +18,13 @@ export function periodOf(date: Date = new Date()): string {
   const month = parts.find((p) => p.type === 'month')!.value;
   return `${year}-${month}`;
 }
+
+/** Período por dia de Brasília (UTC−3), `to` incluso. Sem datas = sem filtro. */
+export function periodRange(from?: string, to?: string): { $gte?: Date; $lt?: Date } | null {
+  const ok = (d?: string) => !!d && /^\d{4}-\d{2}-\d{2}$/.test(d);
+  if (!ok(from) && !ok(to)) return null;
+  const r: { $gte?: Date; $lt?: Date } = {};
+  if (ok(from)) r.$gte = new Date(`${from}T03:00:00.000Z`);
+  if (ok(to)) r.$lt = new Date(new Date(`${to}T03:00:00.000Z`).getTime() + 86_400_000);
+  return r;
+}

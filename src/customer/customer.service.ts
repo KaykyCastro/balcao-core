@@ -406,6 +406,12 @@ export class CustomerService {
     await this.customerModel.updateOne({ _id: id, enterpriseId }, { $set: { debitCents: 0 } }, { session });
   }
 
+  /** Abate exatamente `cents` da dívida; false (sem mexer) se a dívida atual for menor. */
+  async reduceDebitExact(enterpriseId: string, id: string, cents: number, session?: ClientSession): Promise<boolean> {
+    const r = await this.customerModel.updateOne({ _id: id, enterpriseId, debitCents: { $gte: cents } }, { $inc: { debitCents: -cents } }, { session });
+    return r.modifiedCount === 1;
+  }
+
   /** Recebimento de fiado: não aceita valor maior que a dívida. */
   async receivePayment(enterpriseId: string, id: string, dto: CustomerPaymentDto) {
     const cents = toCents(dto.amount);

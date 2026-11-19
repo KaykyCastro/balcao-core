@@ -1,3 +1,4 @@
+import { periodRange } from '../common/period';
 import { BadRequestException, ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
@@ -199,10 +200,12 @@ export class ExchangeService {
     }
   }
 
-  async list(eid: string, page = 1, limit = 20) {
+  async list(eid: string, page = 1, limit = 20, from?: string, to?: string) {
+    const range = periodRange(from, to);
+    const filter = { enterpriseId: eid, ...(range ? { createdAt: range } : {}) };
     const [rows, total] = await Promise.all([
-      this.exchanges.find({ enterpriseId: eid }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
-      this.exchanges.countDocuments({ enterpriseId: eid }),
+      this.exchanges.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      this.exchanges.countDocuments(filter),
     ]);
     const names = await this.customerNames(eid, rows.map((r) => r.customerId).filter(Boolean) as Types.ObjectId[]);
     return { items: rows.map((r) => ({ ...this.present(r), customerName: r.customerId ? names.get(String(r.customerId)) ?? '' : '' })), total, page, limit };

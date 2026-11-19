@@ -17,6 +17,18 @@ const lines = (n: number, len: number) => (v: unknown) =>
   typeof v === 'string' ? v.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '').split('\n').slice(0, n).map((x) => x.slice(0, len)).join('\n') : undefined;
 const int = (min: number, max: number) => (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max ? v : undefined);
 
+/** Formas de pagamento do caixa, na ordem padrão. */
+export const PAY_METHODS = ['cash', 'pix', 'card', 'other', 'fiado'] as const;
+/**
+ * Ordem dos botões de pagamento no caixa (site e app); a primeira vem marcada em cada venda nova. Só as formas
+ * conhecidas, sem repetir; as que faltarem entram no fim, na ordem padrão (nenhuma some do caixa).
+ */
+export function payOrder(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const seen = [...new Set(v.filter((x): x is string => typeof x === 'string' && (PAY_METHODS as readonly string[]).includes(x)))];
+  return [...seen, ...PAY_METHODS.filter((m) => !seen.includes(m))];
+}
+
 const LAYOUT: Record<string, (v: unknown) => unknown> = {
   template: text(20),
   bg: hex,
@@ -38,6 +50,7 @@ const LAYOUT: Record<string, (v: unknown) => unknown> = {
   header: oneOf(['full', 'minimal', 'hidden']),
   columns: oneOf([2, 3, 4]),
   showPhotos: bool, showFilters: bool, showHistory: bool, quickCash: bool, allowDiscount: bool, confirmFinish: bool,
+  payOrder,
   discountPresets: (v) => (Array.isArray(v) ? [...new Set(v.filter((n) => Number.isInteger(n) && n >= 1 && n <= 90) as number[])].sort((a, b) => a - b).slice(0, 4) : undefined),
 };
 

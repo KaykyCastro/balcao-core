@@ -31,6 +31,7 @@ import { CustomerModule } from './customer/customer.module';
 import { AuthModule } from './auth/auth.module';
 import { SaleModule } from './sale/sale.module';
 import { ExchangeModule } from './exchange/exchange.module';
+import { BranchModule } from './branch/branch.module';
 import { BillingModule } from './billing/billing.module';
 import { AdminModule } from './admin/admin.module';
 import { ReportModule } from './report/report.module';
@@ -68,7 +69,7 @@ import { HealthController } from './health/health.controller';
     CategorysModule,
     CustomerModule,
     AuthModule,
-    SaleModule, ExchangeModule,
+    SaleModule, ExchangeModule, BranchModule,
     BillingModule,
     ReportModule,
     PromotionModule,

@@ -1,3 +1,4 @@
+import { contactEmail } from '../branch/contact';
 import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
@@ -50,13 +51,13 @@ export class AutopayService {
   /** Cria a assinatura e devolve o link do Mercado Pago para o lojista cadastrar o cartão lá. */
   async start(eid: string) {
     if (!this.available) throw new ConflictException({ code: 'AUTOPAY_UNAVAILABLE', message: 'O pagamento automático ainda não está disponível. Por enquanto, pague pelo link da fatura (Pix ou cartão).' });
-    const e = await this.enterprises.findById(eid).select('email name autopay feeCapCents').lean();
+    const e = await this.enterprises.findById(eid).select('email parentId name autopay feeCapCents').lean();
     if (!e) throw new NotFoundException('Empresa não encontrada');
     if (e.autopay && ['authorized', 'paused'].includes(e.autopay.status)) throw new ConflictException({ code: 'AUTOPAY_ACTIVE', message: 'A cobrança automática já está ativa.' });
     if (e.autopay?.preapprovalId) await this.mp.updatePreapproval(e.autopay.preapprovalId, { status: 'cancelled' }).catch(() => undefined); // tentativa anterior não concluída
     const cap = e.feeCapCents ?? (await this.settings.policy()).capCents;
     const pp = await this.mp.createPreapproval({
-      reason: 'Balcão ERP: fatura mensal de uso', externalReference: autopayRef(eid), payerEmail: e.email,
+      reason: 'Balcão ERP: fatura mensal de uso', externalReference: autopayRef(eid), payerEmail: await contactEmail(this.enterprises as never, e),
       amountCents: Math.max(100, cap), startDate: nextChargeDate(new Date()), backUrl: `${this.front}/app/pagamento?cartao=1`,
     });
     if (!/^https:\/\//.test(pp.initPoint)) throw new ConflictException('O Mercado Pago não devolveu o link para cadastrar o cartão.');

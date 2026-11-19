@@ -104,6 +104,8 @@ export class OrderConfirmDto {
 export class OrderListQueryDto extends PaginationQueryDto {
   /** 'open' = pagos ainda não entregues; 'all' = tudo menos os abandonados. */
   @IsOptional() @IsIn(['open', 'all', 'to_ship', 'late', 'dispute', 'to_print', ...ORDER_STATUSES]) status?: string;
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) from?: string;
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) to?: string;
 }
 
 export class OrderStatusDto {

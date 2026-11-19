@@ -1,3 +1,4 @@
+import { periodRange } from '../common/period';
 import { phoneIndex } from '../common/security/field-crypto';
 import { storeUrl } from './domain.rules';
 import { lineName, OptionsError, priceChoice } from '../products/options.rules';
@@ -474,6 +475,8 @@ export class OrderService {
     else if (q.status === 'dispute') filter['dispute.status'] = 'open';
     else if (q.status === 'to_print') { filter['label.status'] = 'generated'; filter['label.printedAt'] = null; }
     else filter.status = q.status;
+    const range = periodRange(q.from, q.to);
+    if (range) filter.createdAt = range;
     if (q.search?.trim()) {
       const s = q.search.trim().replace(/^#/, '');
       const rx = { $regex: escapeRegex(s.slice(0, 60)), $options: 'i' };

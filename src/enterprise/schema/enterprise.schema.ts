@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument } from 'mongoose';
+import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
 
 export type EnterpriseDocument = HydratedDocument<EnterpriseSchema>;
 
@@ -139,6 +139,14 @@ export class EnterpriseSchema {
   /** Versão da Política de Privacidade apresentada no cadastro. */
   @Prop({ type: String, default: null, maxlength: 10 })
   privacyVersion?: string | null;
+
+  /**
+   * Filial: id da matriz (null = a própria matriz ou loja sem filiais). A filial é uma empresa própria (produtos,
+   * estoque, vendas, clientes, caixa, colaboradores e fatura separados) sem login próprio: o dono da matriz entra
+   * nela pela troca de loja (branch/). Regras em branch/branch.rules.ts.
+   */
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'EnterpriseSchema', default: null, index: true })
+  parentId?: Types.ObjectId | null;
 
   /** Código da empresa para o login dos funcionários (ex.: BOTECO42). Criado no primeiro funcionário. */
   @Prop({ type: String, default: null, uppercase: true, trim: true })

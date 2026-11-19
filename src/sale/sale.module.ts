@@ -7,6 +7,7 @@ import { ProductModule } from '../products/product.module';
 import { CustomerModule } from '../customer/customer.module';
 import { BillingModule } from '../billing/billing.module';
 import { PromotionModule } from '../promotion/promotion.module';
+import { EnterprisesModule } from '../enterprise/enterprise.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { PromotionModule } from '../promotion/promotion.module';
     CustomerModule,
     BillingModule,
     PromotionModule,
+    EnterprisesModule,
   ],
   controllers: [SaleController],
   providers: [SaleService],

@@ -170,9 +170,12 @@ export class AuthController {
 
   /** Dados da empresa logada (inclui papel, teste grátis e bloqueio). Funciona com a conta bloqueada. */
   @Get('me')
-  async me(@CurrentEnterprise() eid: string, @Req() req: { user: { staff?: unknown } }) {
+  async me(@CurrentEnterprise() eid: string, @Req() req: { user: { staff?: unknown; branchOf?: { rootId: string; rootName: string } } }) {
     const e = await this.enterprises.findEnterpriseById(eid);
-    return { id: String(e._id), ...e.toObject(), ...(req.user.staff ? { staff: req.user.staff } : {}) };
+    // Filiais: o dono vê as lojas do grupo para trocar; colaborador fica só na loja dele.
+    const group = req.user.staff ? [] : await this.enterprises.groupOf(eid);
+    const shared = await this.enterprises.sharedLayout(e); // filial: o layout do sistema é o da matriz
+    return { id: String(e._id), ...e.toObject(), ...(shared ?? {}), ...(req.user.staff ? { staff: req.user.staff } : {}), ...(req.user.branchOf ? { branchOf: req.user.branchOf } : {}), group };
   }
 
   /** Novo aceite quando os Termos ou a Política de Privacidade mudam de versão (fica a data como prova). */
@@ -186,8 +189,9 @@ export class AuthController {
   @Throttle({ default: { limit: 5, ttl: 15 * MIN } })
   @Post('change-password')
   @HttpCode(200)
-  async change(@CurrentEnterprise() eid: string, @Body() dto: ChangePasswordDto, @Res({ passthrough: true }) res: Response) {
-    await this.enterprises.changePassword(eid, dto.currentPassword, dto.newPassword);
+  async change(@CurrentEnterprise() eid: string, @Body() dto: ChangePasswordDto, @Res({ passthrough: true }) res: Response, @Req() req: { user: { branchOf?: { rootId: string } } }) {
+    // Dentro de uma filial, a senha é a do dono (a da matriz).
+    await this.enterprises.changePassword(req.user.branchOf?.rootId ?? eid, dto.currentPassword, dto.newPassword);
     clearSessionCookie(res, this.config);
     return { message: 'Senha alterada. Entre novamente.' };
   }
@@ -195,8 +199,9 @@ export class AuthController {
   /** "Sair de todos os dispositivos" (também revoga os aparelhos confiáveis: eles dependem da versão da sessão). */
   @Post('logout-all')
   @HttpCode(200)
-  async logoutAll(@CurrentEnterprise() eid: string, @Res({ passthrough: true }) res: Response) {
-    await this.enterprises.revokeAllSessions(eid);
+  async logoutAll(@CurrentEnterprise() eid: string, @Res({ passthrough: true }) res: Response, @Req() req: { user: { branchOf?: { rootId: string } } }) {
+    // Na matriz: derruba também as sessões abertas nas filiais (elas conferem a versão da matriz).
+    await this.enterprises.revokeAllSessions(req.user.branchOf?.rootId ?? eid);
     clearSessionCookie(res, this.config);
     return { message: 'Todas as sessões foram encerradas.' };
   }

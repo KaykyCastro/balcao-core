@@ -129,6 +129,10 @@ export class Sale {
   }))
   payment?: { provider: string; method: string; installments?: number; amountCents: number; reference?: string; paymentId?: string; brand?: string; paidAt?: Date; intentId?: Types.ObjectId } | null;
 
+  /** Correções da forma de pagamento (sempre com a senha do dono). Ficam para sempre na venda. */
+  @Prop({ type: [{ _id: false, from: String, to: String, reason: String, at: Date, by: raw({ name: String, staffId: { type: MongooseSchema.Types.ObjectId, default: null }, _id: false }) }], default: undefined })
+  paymentEdits?: { from: string; to: string; reason: string; at: Date; by: { name: string; staffId: Types.ObjectId | null } }[];
+
   /** Taxa do ERP cobrada nesta venda (0,5%, limitada pelo teto). */
   @Prop({ required: true, min: 0, default: 0 })
   feeCents: number;

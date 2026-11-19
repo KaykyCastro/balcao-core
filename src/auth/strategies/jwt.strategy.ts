@@ -19,13 +19,24 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   /** Carrega a empresa a cada request: bloqueio, suspensão, papel e versão do token chegam sempre atualizados. */
-  async validate(payload: { sub: string; tv?: number; st?: string; stv?: number; typ?: string; ds?: string; adm?: string }) {
+  async validate(payload: { sub: string; tv?: number; st?: string; stv?: number; typ?: string; ds?: string; adm?: string; br?: string; rtv?: number }) {
     // Tokens auxiliares (aparelho confiável, Google) usam segredos próprios e têm "typ"; nunca valem como sessão.
     if (payload.typ) throw new UnauthorizedException();
     const enterprise = await this.enterpriseService.findForAuth(payload.sub);
     if (!enterprise) throw new UnauthorizedException();
     if ((enterprise as unknown as { tokenVersion?: number }).tokenVersion !== (payload.tv ?? 0)) throw new UnauthorizedException('Sessão encerrada. Entre novamente.');
     if (enterprise.status === 'suspended') throw new ForbiddenException({ statusCode: 403, code: 'ACCOUNT_SUSPENDED', message: 'Conta suspensa. Fale com o suporte.' });
+    // Dono dentro de uma filial: vale enquanto a sessão da matriz valer (senha trocada ou "sair de todos" derrubam).
+    if (payload.br) {
+      if (payload.st || payload.ds || String(enterprise.parentId ?? '') !== payload.br) throw new UnauthorizedException();
+      const root = await this.enterpriseService.findForAuth(payload.br);
+      if (!root || (root as unknown as { tokenVersion?: number }).tokenVersion !== (payload.rtv ?? 0)) throw new UnauthorizedException('Sessão encerrada. Entre novamente.');
+      if (root.status === 'suspended') throw new ForbiddenException({ statusCode: 403, code: 'ACCOUNT_SUSPENDED', message: 'Conta suspensa. Fale com o suporte.' });
+      (enterprise as unknown as { branchOf: unknown }).branchOf = { rootId: payload.br, rootName: root.name };
+    } else if (enterprise.parentId && !payload.st && !payload.ds) {
+      // Filial só abre pela troca de loja (com a matriz); colaborador da filial entra pelo código da loja.
+      throw new UnauthorizedException();
+    }
     // Sessão de design do admin: a permissão do lojista precisa estar valendo agora (design.rules.ts).
     if (payload.ds || payload.adm) {
       const ds = payload.ds && payload.adm ? await this.design.sessionFor({ sub: payload.sub, tv: payload.tv ?? 0, ds: payload.ds, adm: payload.adm }) : null;

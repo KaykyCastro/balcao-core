@@ -84,7 +84,8 @@ describe('BillingService.applyFee', () => {
   const mk = (enterprise: Record<string, unknown>, monthSum = 0) => {
     const feeModel = {
       create: jest.fn().mockResolvedValue([]),
-      aggregate: jest.fn().mockReturnValue({ session: jest.fn().mockResolvedValue(monthSum ? [{ sum: monthSum }] : []) }),
+      // Totais do mês no balcão: neste teste, tudo o que foi vendido antes pagou a taxa cheia (cobrado = 0,5% somado).
+      aggregate: jest.fn().mockReturnValue({ session: jest.fn().mockResolvedValue(monthSum ? [{ base: monthSum * 200, raw: monthSum, charged: monthSum, unbilled: monthSum }] : []) }),
     };
     const enterpriseService = { lockForBilling: jest.fn().mockResolvedValue({ billing: { status: 'active' }, createdAt: new Date(Date.now() - 90 * DAY), ...enterprise }), addDebt: jest.fn() };
     const svc = new BillingService(feeModel as any, {} as any, {} as any, {} as any, enterpriseService as any, {} as any, { get: () => undefined } as any, { policy: async () => ({ capCents: policy.capCents, trialDays: 30 }) } as any);
@@ -115,7 +116,9 @@ describe('BillingService.applyFee', () => {
     await expect(a.svc.applyFee(EID, sid, 1_000_000, {} as any)).resolves.toBe(10);
     const b = mk({}, 4000);
     await expect(b.svc.applyFee(EID, sid, 1_000_000, {} as any)).resolves.toBe(0);
-    expect(b.feeModel.create).not.toHaveBeenCalled();
+    // Fica registrada com taxa 0: o total vendido no mês define a faixa do teto (fee-tiers.ts).
+    expect(b.feeModel.create.mock.calls[0][0][0]).toMatchObject({ feeCents: 0, baseCents: 1_000_000, rawFeeCents: 5000 });
+    expect(b.enterpriseService.addDebt).not.toHaveBeenCalled();
   });
   it('teto da empresa (definido pelo admin) vale mais que o padrão', async () => {
     const a = mk({ feeCapCents: 1000 }, 990);
@@ -130,6 +133,13 @@ describe('BillingService.applyFee', () => {
     const a = mk({}, 90);
     await expect(a.svc.applyFee(EID, sid, 1_000_000, {} as any)).resolves.toBe(10);
     policy.capCents = 4000;
+  });
+  it('faixas (a partir de BILLING_TIERS_FROM): a venda que leva o mês de R$ 20 mil para a 2ª faixa cobra a diferença do teto', async () => {
+    const feeModel = { create: jest.fn().mockResolvedValue([]), aggregate: jest.fn().mockReturnValue({ session: jest.fn().mockResolvedValue([{ base: 2_000_000, raw: 10_000, charged: 4_000, unbilled: 4_000 }]) }) };
+    const enterpriseService = { lockForBilling: jest.fn().mockResolvedValue({ billing: { status: 'active' }, createdAt: new Date(Date.now() - 90 * DAY) }), addDebt: jest.fn() };
+    const config = { get: (k: string) => (k === 'BILLING_TIERS_FROM' ? '2000-01' : undefined) };
+    const svc = new BillingService(feeModel as any, {} as any, {} as any, {} as any, enterpriseService as any, {} as any, config as any, { policy: async () => ({ capCents: 4000, trialDays: 30 }) } as any);
+    await expect(svc.applyFee(EID, sid, 10_000, {} as any)).resolves.toBe(6_000); // R$ 20.100 no mês → teto R$ 100
   });
   it('conta bloqueada: 402 BILLING_BLOCKED', async () => {
     const { svc } = mk({ billing: { status: 'blocked' } });

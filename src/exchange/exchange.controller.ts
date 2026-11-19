@@ -27,6 +27,6 @@ export class ExchangeController {
   }
 
   /** Histórico de trocas (para sempre). */
-  @Get() list(@CurrentEnterprise() eid: string, @Query() q: ExchangeListDto) { return this.svc.list(eid, q.page ?? 1, q.limit ?? 20); }
+  @Get() list(@CurrentEnterprise() eid: string, @Query() q: ExchangeListDto) { return this.svc.list(eid, q.page ?? 1, q.limit ?? 20, q.from, q.to); }
   @Get(':id') get(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string) { return this.svc.get(eid, id); }
 }

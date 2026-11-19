@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsIn, IsInt, IsMongoId, IsOptional, IsString, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsInt, IsMongoId, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
 import { CASH_MAX_CENTS } from '../common/money';
 import { SaleItemInputDto } from '../sale/dto/sale-create.dto';
 
@@ -36,4 +36,6 @@ export class ExchangeLookupDto {
 export class ExchangeListDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number;
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) from?: string;
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) to?: string;
 }

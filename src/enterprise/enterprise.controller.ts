@@ -18,7 +18,9 @@ export class EnterpriseController {
   @Get(':id')
   async findById(@Param('id', ParseMongoIdPipe) id: string, @CurrentEnterprise() current: string) {
     this.assertOwn(id, current);
-    return this.enterpriseService.findEnterpriseById(id);
+    const e = await this.enterpriseService.findEnterpriseById(id);
+    const shared = await this.enterpriseService.sharedLayout(e); // filial: logo, cores e limite de desconto da matriz
+    return shared ? { ...e.toJSON(), ...shared } : e;
   }
 
   /** Layout da tela de vendas (o mesmo para web, app e colaboradores). Colaborador só lê. */
