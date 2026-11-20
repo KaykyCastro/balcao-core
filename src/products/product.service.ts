@@ -11,6 +11,7 @@ import { ProductCreateDto } from './dto/product-create.dto';
 import { ProductUpdateDto } from './dto/product-update.dto';
 import { CategoryService } from '../category/category.service';
 import { PaginationQueryDto, Paginated } from '../common/dto/pagination-query.dto';
+import { HAS_IMAGE } from '../store/market-listing.rules';
 import { escapeRegex, isDuplicateKeyError } from '../common/mongo';
 import { round2 } from '../common/money';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
@@ -29,6 +30,9 @@ function optionsOrThrow(raw: unknown) {
   try { return sanitizeOptions(raw ?? []); }
   catch (e) { if (e instanceof OptionsError) throw new BadRequestException({ statusCode: 400, code: 'OPTIONS_INVALID', message: e.message }); throw e; }
 }
+
+/** Campos que a recomendação usa (sem nada privado). */
+const RECO_FIELDS = '_id enterpriseId categoryId createdAt name price priceWithDiscount onlinePrice discountMode discountPercentage soldCount';
 
 @Injectable()
 export class ProductService {
@@ -196,8 +200,9 @@ export class ProductService {
    * sort: relevance (com estoque primeiro) | price_asc | price_desc | name | new | sold (mais vendidos). Preço = o da loja online.
    * offers: só produtos com desconto, preço online menor que o do balcão ou promoção ativa (`promoIds`).
    */
-  async publicList(enterpriseIds: string[], q: { search?: string; categoryId?: string; ids?: string[]; page: number; limit: number; inStock?: boolean; sort?: string; offers?: boolean; promoIds?: string[]; lowStock?: boolean }) {
+  async publicList(enterpriseIds: string[], q: { search?: string; categoryId?: string; ids?: string[]; page: number; limit: number; inStock?: boolean; sort?: string; offers?: boolean; promoIds?: string[]; lowStock?: boolean; withImage?: boolean; maxCents?: number }) {
     const and: Record<string, unknown>[] = [{ enterpriseId: { $in: enterpriseIds.map((x) => new Types.ObjectId(x)) } }, { showOnline: { $ne: false } }];
+    if (q.withImage) and.push({ ...HAS_IMAGE }); // marketplace: só produto com foto (market-listing.rules.ts)
     if (q.categoryId) and.push({ categoryId: new Types.ObjectId(q.categoryId) });
     if (q.ids?.length) and.push({ _id: { $in: q.ids.map((x) => new Types.ObjectId(x)) } });
     if (q.search?.trim()) and.push({ name: { $regex: escapeRegex(q.search.trim().slice(0, 60)), $options: 'i' } });
@@ -220,9 +225,13 @@ export class ProductService {
     const inStock = { $cond: [{ $or: [{ $eq: ['$trackStock', false] }, { $gt: ['$quantity', 0] }] }, 1, 0] };
     const sort: Record<string, 1 | -1> = q.sort === 'price_asc' ? { _eff: 1, name: 1 } : q.sort === 'price_desc' ? { _eff: -1, name: 1 } : q.sort === 'name' ? { name: 1 } : q.sort === 'new' ? { createdAt: -1 } : q.sort === 'sold' ? { soldCount: -1, createdAt: -1 } : { _stock: -1, updatedAt: -1, name: 1 };
     const match = { $and: and };
+    // Teto de preço (marketplace "até R$ X"): pelo preço da loja online, calculado acima.
+    const cap = q.maxCents ? [{ $match: { _eff: { $lte: q.maxCents / 100 } } }] : [];
     const [items, total] = await Promise.all([
-      this.productModel.aggregate([{ $match: match }, { $addFields: { _eff: eff, _stock: inStock, _photos: { $size: { $ifNull: ['$images', []] } } } }, { $sort: sort }, { $skip: (q.page - 1) * q.limit }, { $limit: q.limit }, { $project: { _eff: 0, _stock: 0, images: 0 } }]),
-      this.productModel.countDocuments(match),
+      this.productModel.aggregate([{ $match: match }, { $addFields: { _eff: eff, _stock: inStock, _photos: { $size: { $ifNull: ['$images', []] } } } }, ...cap, { $sort: sort }, { $skip: (q.page - 1) * q.limit }, { $limit: q.limit }, { $project: { _eff: 0, _stock: 0, images: 0 } }]),
+      q.maxCents
+        ? this.productModel.aggregate<{ n: number }>([{ $match: match }, { $addFields: { _eff: eff } }, ...cap, { $count: 'n' }]).then((r) => r[0]?.n ?? 0)
+        : this.productModel.countDocuments(match),
     ]);
     return { items: items as (ProductSchema & { _id: Types.ObjectId; enterpriseId: Types.ObjectId })[], total, page: q.page, limit: q.limit };
   }
@@ -243,8 +252,16 @@ export class ProductService {
   /** Produtos novos (cadastrados há pouco) das lojas dadas, para os avisos do marketplace. */
   async recentPublic(enterpriseIds: string[], since: Date, limit = 6) {
     if (!enterpriseIds.length) return [];
-    return this.productModel.find({ enterpriseId: { $in: enterpriseIds.map((x) => new Types.ObjectId(x)) }, showOnline: { $ne: false }, createdAt: { $gt: since }, $or: [{ trackStock: false }, { quantity: { $gt: 0 } }] })
+    return this.productModel.find({ enterpriseId: { $in: enterpriseIds.map((x) => new Types.ObjectId(x)) }, showOnline: { $ne: false }, ...HAS_IMAGE, createdAt: { $gt: since }, $or: [{ trackStock: false }, { quantity: { $gt: 0 } }] })
       .select('name image enterpriseId createdAt').sort({ createdAt: -1 }).limit(limit).lean();
+  }
+
+  /** Dos ids dados, os que têm foto (vendas recentes do marketplace). */
+  async withImageIds(ids: string[]): Promise<Set<string>> {
+    const ok = ids.filter((x) => Types.ObjectId.isValid(x)).map((x) => new Types.ObjectId(x));
+    if (!ok.length) return new Set();
+    const rows = await crossTenant(this.productModel, 'marketplace: quais produtos vendidos têm foto').find({ _id: { $in: ok }, ...HAS_IMAGE }).select('_id').lean();
+    return new Set(rows.map((r) => String(r._id)));
   }
 
   /** Produtos visíveis por id (marketplace: recomendações e curtidas), sem as fotos extras. */
@@ -257,10 +274,17 @@ export class ProductService {
   }
 
   /** Candidatos para recomendar: em estoque e só das lojas listadas no marketplace (a preferência só ordena). */
-  async recommendationCandidates(listedEnterpriseIds: string[], limit = 300) {
+  async recommendationCandidates(listedEnterpriseIds: string[], limit = 600) {
     if (!listedEnterpriseIds.length) return [];
-    return this.productModel.find({ enterpriseId: { $in: listedEnterpriseIds.map((x) => new Types.ObjectId(x)) }, showOnline: { $ne: false }, $or: [{ trackStock: false }, { quantity: { $gt: 0 } }] })
-      .select('_id enterpriseId categoryId createdAt').sort({ updatedAt: -1 }).limit(limit).lean();
+    return this.productModel.find({ enterpriseId: { $in: listedEnterpriseIds.map((x) => new Types.ObjectId(x)) }, showOnline: { $ne: false }, ...HAS_IMAGE, $or: [{ trackStock: false }, { quantity: { $gt: 0 } }] })
+      .select(RECO_FIELDS).sort({ updatedAt: -1 }).limit(limit).lean();
+  }
+
+  /** Nome, preço e categoria dos produtos do histórico do visitante (mesmo sem estoque), para o perfil de interesse. */
+  async recommendationSignals(ids: string[]) {
+    const ok = ids.filter((x) => Types.ObjectId.isValid(x)).map((x) => new Types.ObjectId(x));
+    if (!ok.length) return [];
+    return crossTenant(this.productModel, 'marketplace: dados públicos dos produtos que o visitante viu').find({ _id: { $in: ok } }).select(RECO_FIELDS).lean();
   }
 
   /** Produtos visíveis na loja online para o sitemap (só id e data da última mudança). */
@@ -310,7 +334,8 @@ export class ProductService {
   /** Quantos produtos publicados cada empresa tem (diretório de lojas). */
   async countOnline(enterpriseIds: string[]): Promise<Map<string, number>> {
     const rows = await this.productModel.aggregate<{ _id: unknown; n: number }>([
-      { $match: { enterpriseId: { $in: enterpriseIds.map((x) => new Types.ObjectId(x)) }, showOnline: { $ne: false } } },
+      // Só é usado pela lista de lojas do marketplace: conta o que aparece lá (produto com foto).
+      { $match: { enterpriseId: { $in: enterpriseIds.map((x) => new Types.ObjectId(x)) }, showOnline: { $ne: false }, ...HAS_IMAGE } },
       { $group: { _id: '$enterpriseId', n: { $sum: 1 } } },
     ]);
     return new Map(rows.map((r) => [String(r._id), r.n]));

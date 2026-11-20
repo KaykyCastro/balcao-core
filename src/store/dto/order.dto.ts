@@ -135,12 +135,17 @@ export class MarketProductsQueryDto extends PublicProductsQueryDto {
   @IsOptional() @IsString() @MaxLength(20) segment?: string;
   /** Só as últimas unidades (1 a 3 em estoque). */
   @IsOptional() @Transform(({ value }) => value === true || value === 'true' || value === '1') @IsBoolean() lowStock?: boolean;
+  /** Até este preço (centavos, o preço da loja online): "Achados até R$ 50". */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(100) @Max(100_000_000) maxCents?: number;
 }
 
 /** Ids de produtos e visitante (recomendações e curtidas). */
 export class VisitorQueryDto {
   @IsOptional() @IsString() @Matches(/^[a-f0-9]{32}$/, { message: 'Visitante inválido' }) visitorId?: string;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(24) limit?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(48) limit?: number;
+  /** Página da vitrine "para você" (com `all`, inclui os já vistos no fim). */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(40) page?: number;
+  @IsOptional() @IsIn(['1']) all?: '1';
 }
 
 export class DirectoryQueryDto extends PaginationQueryDto {

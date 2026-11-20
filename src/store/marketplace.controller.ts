@@ -7,7 +7,7 @@ import { MarketplaceService } from './marketplace.service';
 class EventDto {
   @Matches(/^[a-f0-9]{32}$/, { message: 'Visitante inválido' }) visitorId: string;
   @IsMongoId() productId: string;
-  @IsIn(['view', 'like', 'unlike']) kind: 'view' | 'like' | 'unlike';
+  @IsIn(['view', 'like', 'unlike', 'cart']) kind: 'view' | 'like' | 'unlike' | 'cart';
 }
 class ForgetDto { @Matches(/^[a-f0-9]{32}$/, { message: 'Visitante inválido' }) visitorId: string }
 

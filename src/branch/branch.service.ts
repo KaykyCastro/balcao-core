@@ -14,6 +14,7 @@ import { ProductSchema } from '../products/schema/product.schema';
 import { Sale } from '../sale/schema/sale.schema';
 import { Staff } from '../staff/schema/staff.schema';
 import { StorageService } from '../storage/storage.service';
+import { EnterpriseService } from '../enterprise/enterprise.service';
 import { webSessionLife } from '../auth/session-cookie';
 import { BranchError, MAX_BRANCHES, branchEmail, branchName, branchTrialEnd, importPlan, rootOf } from './branch.rules';
 
@@ -44,6 +45,7 @@ export class BranchService {
     private readonly storage: StorageService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly enterpriseService: EnterpriseService,
   ) {
     const why = 'filiais: só as lojas do grupo de quem pediu (matriz + filiais)';
     this.products = crossTenant(products, why);
@@ -170,6 +172,28 @@ export class BranchService {
     const accessToken = this.jwt.sign(payload, { expiresIn: life as never });
     const exp = (this.jwt.decode(accessToken) as { exp?: number } | null)?.exp;
     return { accessToken, expiresAt: new Date(exp ? exp * 1000 : Date.now() + DAY), store: { id: target, name: t.name } };
+  }
+
+  /**
+   * Exclui uma FILIAL do grupo (nunca a matriz), com a senha do dono. Usa a exclusão de conta de sempre: apaga
+   * produtos, estoque, vendas, clientes, caixa, colaboradores, loja online e arquivos da filial; faturas e taxas ficam
+   * como registro. Recusa com taxa do Balcão em aberto ou pedido online em andamento.
+   */
+  async remove(eid: string, target: string, password: string) {
+    const { t } = await this.inGroup(eid, target);
+    if (!t.parentId) this.fail(new BranchError('BRANCH_IS_ROOT', 'A matriz não é excluída por aqui. Para encerrar a empresa inteira, exclua as filiais e depois a conta da matriz em Configurações.', 400));
+    try {
+      await this.enterpriseService.delete(target, password);
+    } catch (e) {
+      // As mensagens da exclusão de conta falam em "conta": aqui é a filial.
+      const code = (e as { response?: { code?: string } }).response?.code;
+      if (code === 'DEBT_OPEN') this.fail(new BranchError('DEBT_OPEN', `A filial ${t.name} tem taxa do Balcão em aberto. Pague a fatura dela (entre na filial, em Plano e pagamento) antes de excluir.`));
+      if (code === 'ORDERS_OPEN') this.fail(new BranchError('ORDERS_OPEN', `A loja online da filial ${t.name} tem pedido em andamento. Entregue, cancele ou devolva antes de excluir: o comprador não pode ficar sem resposta.`));
+      if (e instanceof ForbiddenException && /senha/i.test(e.message)) this.fail(new BranchError('OWNER_PASSWORD_WRONG', 'Senha do dono incorreta.', 403));
+      throw e;
+    }
+    this.log.log(`Filial excluída: ${target} (grupo de ${String(t.parentId)})`);
+    return { id: target, name: t.name, rootId: String(t.parentId) };
   }
 
   /** Busca de produto em todas as lojas do grupo: preço e estoque de cada uma. */

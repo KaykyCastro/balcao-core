@@ -9,6 +9,7 @@ import { Sale, SaleSchemaFactory } from '../sale/schema/sale.schema';
 import { Staff, StaffSchemaFactory } from '../staff/schema/staff.schema';
 import { BranchController } from './branch.controller';
 import { BranchService } from './branch.service';
+import { EnterprisesModule } from '../enterprise/enterprise.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { BranchService } from './branch.service';
       { name: Sale.name, schema: SaleSchemaFactory },
       { name: Staff.name, schema: StaffSchemaFactory },
     ]),
+    EnterprisesModule,
     // Mesmo segredo da sessão: a troca de loja emite a sessão da loja escolhida.
     JwtModule.registerAsync({
       inject: [ConfigService],

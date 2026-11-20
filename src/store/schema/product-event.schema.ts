@@ -12,7 +12,7 @@ export class ProductEvent {
   @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true }) productId: Types.ObjectId;
   @Prop({ type: MongooseSchema.Types.ObjectId, required: true }) enterpriseId: Types.ObjectId;
   @Prop({ type: MongooseSchema.Types.ObjectId, default: null }) categoryId: Types.ObjectId | null;
-  @Prop({ type: String, enum: ['view', 'like'], required: true }) kind: 'view' | 'like';
+  @Prop({ type: String, enum: ['view', 'like', 'cart'], required: true }) kind: 'view' | 'like' | 'cart';
   @Prop({ type: Date, required: true, expires: 90 * 24 * 3600 }) at: Date;
 }
 export const ProductEventSchema = SchemaFactory.createForClass(ProductEvent);

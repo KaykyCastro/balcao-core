@@ -27,8 +27,8 @@ export class SessionRenewInterceptor implements NestInterceptor {
   intercept(ctx: ExecutionContext, next: CallHandler) {
     if (ctx.getType() !== 'http') return next.handle();
     const req = ctx.switchToHttp().getRequest<Request & { user?: { _id?: unknown } }>();
-    // A troca de loja (filiais) põe outra sessão no cookie: renovar a atual na mesma resposta mandaria dois cookies.
-    if (!req.user?._id || req.headers['x-design-session'] || req.path.startsWith('/auth/logout') || /^\/branches\/[^/]+\/switch$/.test(req.path)) return next.handle();
+    // A troca de loja e a exclusão de filial (filiais) põem outra sessão no cookie: renovar a atual mandaria dois cookies.
+    if (!req.user?._id || req.headers['x-design-session'] || req.path.startsWith('/auth/logout') || /^\/branches\/[^/]+\/switch$/.test(req.path) || (req.method === 'DELETE' && /^\/branches\/[^/]+$/.test(req.path))) return next.handle();
     const token = readCookie(req, SESSION_COOKIE);
     if (!token) return next.handle();
     try {

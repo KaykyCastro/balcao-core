@@ -1,3 +1,4 @@
+import { hasImage } from './market-listing.rules';
 import { Body, Controller, Get, Headers, HttpCode, NotFoundException, Param, Post, Query, Req, Res } from '@nestjs/common';
 import { DomainService } from './domain.service';
 import { MpOrdersWebhookService } from './mp-orders-webhook.service';
@@ -93,7 +94,7 @@ export class StorefrontController {
     if (!listed.length) return { items: [], total: 0, page: q.page, limit: q.limit };
     // Ofertas: também os produtos em promoção ativa (é delas que sai a contagem regressiva do marketplace).
     const promoIds = q.offers ? (await Promise.all(listed.map((s) => this.promotions.activeProductIds(s.enterpriseId)))).flat() : undefined;
-    const page = await this.products.publicList(listed.map((s) => s.enterpriseId), { search: q.search, page: q.page, limit: Math.min(q.limit, 48), inStock: true, sort: q.sort, offers: q.offers, lowStock: q.lowStock, promoIds });
+    const page = await this.products.publicList(listed.map((s) => s.enterpriseId), { search: q.search, page: q.page, limit: Math.min(q.limit, 48), inStock: true, sort: q.sort, offers: q.offers, lowStock: q.lowStock, promoIds, withImage: true, maxCents: q.maxCents, ids: q.ids ? q.ids.split(',') : undefined });
     return { ...page, items: await this.marketCards(page.items as P[], listed) };
   }
 
@@ -105,7 +106,8 @@ export class StorefrontController {
     for (const s of stores) {
       const found = await this.promotions.decorate(s.enterpriseId, await this.products.publicMany(s.enterpriseId, s.reels.map((r) => r.productId)));
       const byId = new Map(found.map((p) => [String((p as P)._id), card(p as P, false, { slug: s.slug, name: s.name, cashbackBps: s.cashbackBps })]));
-      out.push(s.reels.filter((r) => byId.has(r.productId)).map((r) => ({ video: r.video, title: r.title ?? '', store: { slug: s.slug, name: s.name, logo: s.logo, accent: s.accent }, product: byId.get(r.productId)! })));
+      // Marketplace: o vídeo só entra se o produto dele tiver foto.
+      out.push(s.reels.filter((r) => byId.has(r.productId) && hasImage(byId.get(r.productId))).map((r) => ({ video: r.video, title: r.title ?? '', store: { slug: s.slug, name: s.name, logo: s.logo, accent: s.accent }, product: byId.get(r.productId)! })));
     }
     // Um de cada loja por vez, para a faixa não ficar com uma loja só.
     const items: (typeof out)[number] = [];
@@ -125,9 +127,10 @@ export class StorefrontController {
       this.rewards.publicCoupons(eids, 24),
     ]);
     const store = (eid: string) => { const s = byE.get(eid)!; return { slug: s.slug, name: s.name }; };
+    const withPhoto = await this.products.withImageIds(sales.map((x) => x.productId)); // venda de produto sem foto não aparece
     const img = (eid: string, pid: string) => `/public/store/${encodeURIComponent(byE.get(eid)!.slug)}/products/${pid}/image`;
     const items = [
-      ...sales.map((x) => ({ kind: 'sale' as const, at: x.at, text: x.productName, city: x.city, productId: x.productId, image: img(x.enterpriseId, x.productId), store: store(x.enterpriseId) })),
+      ...sales.filter((x) => withPhoto.has(x.productId)).map((x) => ({ kind: 'sale' as const, at: x.at, text: x.productName, city: x.city, productId: x.productId, image: img(x.enterpriseId, x.productId), store: store(x.enterpriseId) })),
       ...fresh.map((p) => ({ kind: 'new' as const, at: (p as unknown as { createdAt: Date }).createdAt, text: p.name, city: '', productId: String(p._id), image: img(String(p.enterpriseId), String(p._id)), store: store(String(p.enterpriseId)) })),
       ...coupons.filter((c) => c.endsAt && new Date(c.endsAt).getTime() - Date.now() < 48 * 3600_000).map((c) => ({ kind: 'coupon' as const, at: c.endsAt, text: `${c.code} · ${c.label}`, city: '', productId: '', image: '', store: store(c.enterpriseId) })),
     ];
@@ -179,8 +182,11 @@ export class StorefrontController {
   /** Recomendados para o visitante (ou em alta, sem histórico). */
   @Get('recommendations')
   async recommendations(@Query() q: VisitorQueryDto) {
-    const { ids, personal } = await this.market.recommend(q.visitorId, q.limit ?? 12);
-    return { personal, items: await this.marketCards((await this.products.publicByIds(ids)) as unknown as P[], await this.stores.listedStores()) };
+    const { ids, total, personal, profile } = await this.market.recommend(q.visitorId, { limit: q.limit ?? 12, page: q.page ?? 1, all: q.all === '1' });
+    const byId = new Map(((await this.products.publicByIds(ids)) as unknown as P[]).map((p) => [String(p._id), p]));
+    // publicByIds não garante a ordem: devolve na ordem da recomendação.
+    const ordered = ids.map((id) => byId.get(id)).filter((p): p is P => !!p);
+    return { personal, total, profile, items: await this.marketCards(ordered, await this.stores.listedStores()) };
   }
 
   /** Produtos curtidos pelo visitante, mais recentes primeiro. */
@@ -197,7 +203,7 @@ export class StorefrontController {
     const items: ReturnType<typeof card>[] = [];
     for (const p of list) {
       const s = byEid.get(String((p as unknown as { enterpriseId: unknown }).enterpriseId));
-      if (!s) continue;
+      if (!s || !hasImage(p)) continue; // marketplace: só produto com foto
       const [d] = await this.promotions.decorate(s.enterpriseId, [p]);
       items.push(card(d as P, false, { slug: s.slug, name: s.name, cashbackBps: s.cashbackBps ?? 0 }));
     }

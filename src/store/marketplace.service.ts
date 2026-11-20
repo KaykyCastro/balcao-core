@@ -5,7 +5,8 @@ import { ProductService } from '../products/product.service';
 import { ProductEvent } from './schema/product-event.schema';
 import { Order } from './schema/order.schema';
 import { StoreService } from './store.service';
-import { interestProfile, rankCandidates, VISITOR_RE, type Interaction } from './recommendation.rules';
+import { collaborative, interestProfile, profileSummary, rankCandidates, VISITOR_RE, type Candidate, type EventKind, type Interaction } from './recommendation.rules';
+import { onlineEffectivePrice } from '../products/schema/product.schema';
 import { crossTenant } from '../common/security/tenant-guard.plugin';
 
 /** Marketplace "Lojas no Balcão": interações (ver/curtir) e recomendações, só de lojas listadas. */
@@ -23,7 +24,7 @@ export class MarketplaceService {
   private check(visitorId: string) { if (!VISITOR_RE.test(visitorId)) throw new BadRequestException('Visitante inválido'); }
 
   /** Registra uma visualização ou curtida. Visualizações repetidas em 30 min contam uma vez. */
-  async track(visitorId: string, productId: string, kind: 'view' | 'like' | 'unlike') {
+  async track(visitorId: string, productId: string, kind: 'view' | 'like' | 'unlike' | 'cart') {
     this.check(visitorId);
     if (!Types.ObjectId.isValid(productId)) throw new BadRequestException('Produto inválido');
     const [p] = await this.products.publicByIds([productId]);
@@ -32,9 +33,9 @@ export class MarketplaceService {
     if (!listed.has(String(p.enterpriseId))) return { ok: true }; // loja fora do marketplace: não entra na recomendação
     const base = { visitorId, productId: new Types.ObjectId(productId) };
     if (kind === 'unlike') { await this.events.deleteOne({ ...base, kind: 'like' }); return { ok: true }; }
-    if (kind === 'view' && (await this.events.exists({ ...base, kind: 'view', at: { $gt: new Date(Date.now() - 30 * 60_000) } }))) return { ok: true };
+    if (kind !== 'like' && (await this.events.exists({ ...base, kind, at: { $gt: new Date(Date.now() - 30 * 60_000) } }))) return { ok: true };
     const extra = { enterpriseId: p.enterpriseId, categoryId: p.categoryId ?? null, at: new Date() };
-    if (kind === 'view') await this.events.create({ ...base, kind, ...extra });
+    if (kind !== 'like') await this.events.create({ ...base, kind, ...extra });
     else await this.events.updateOne({ ...base, kind: 'like' }, { $setOnInsert: extra }, { upsert: true }).catch((e) => { if ((e as { code?: number }).code !== 11000) throw e; });
     return { ok: true };
   }
@@ -70,30 +71,63 @@ export class MarketplaceService {
     return rows.map((r) => String(r.productId));
   }
 
-  /** Mais vistos e curtidos nos últimos 14 dias, de todos os visitantes (o que está em alta). */
+  /** Mais vistos, curtidos e postos no carrinho nos últimos 14 dias, de todos os visitantes (o que está em alta). */
   async popularity(days = 14): Promise<Map<string, number>> {
     const rows = await this.events.aggregate<{ _id: Types.ObjectId; score: number }>([
       { $match: { at: { $gt: new Date(Date.now() - days * 864e5) } } },
-      { $group: { _id: '$productId', score: { $sum: { $cond: [{ $eq: ['$kind', 'like'] }, 4, 1] } } } },
-      { $sort: { score: -1 } }, { $limit: 500 },
+      { $group: { _id: '$productId', score: { $sum: { $switch: { branches: [{ case: { $eq: ['$kind', 'like'] }, then: 4 }, { case: { $eq: ['$kind', 'cart'] }, then: 6 }], default: 1 } } } } },
+      { $sort: { score: -1 } }, { $limit: 800 },
     ]);
     return new Map(rows.map((r) => [String(r._id), r.score]));
   }
 
   /**
-   * Recomendações: com histórico, produtos novos para o visitante nas categorias e lojas de que ele mais gosta;
-   * sem histórico (ou sem consentimento), o que está em alta. Devolve ids na ordem.
+   * "Quem se interessou pelos mesmos produtos também viu": outras pessoas que tocaram nos produtos desta, e o que
+   * mais elas viram/curtiram/puseram no carrinho (só ids aleatórios de visitante; nada pessoal).
    */
-  async recommend(visitorId: string | undefined, limit = 12): Promise<{ ids: string[]; personal: boolean }> {
+  private async collab(visitorId: string, mine: Set<string>) {
+    if (!mine.size) return new Map<string, number>();
+    const ids = [...mine].slice(0, 60).map((x) => new Types.ObjectId(x));
+    const peers = (await this.events.distinct('visitorId', { productId: { $in: ids }, visitorId: { $ne: visitorId } })).slice(0, 300);
+    if (!peers.length) return new Map<string, number>();
+    const rows = await this.events.find({ visitorId: { $in: peers } }).sort({ at: -1 }).limit(5000).select('visitorId productId kind').lean();
+    return collaborative(mine, rows.map((r) => ({ visitorId: r.visitorId, productId: String(r.productId), kind: r.kind as EventKind })));
+  }
+
+  /**
+   * Recomendações. Com histórico (só com o aceite de preferências): perfil de interesse (categorias, lojas, ramos,
+   * faixa de preço e palavras do que a pessoa viu, curtiu e pôs no carrinho) + colaborativo + um pouco do que está em
+   * alta e do que é novo. Sem histórico, o que está em alta. `all`: vitrine completa paginada (já vistos no fim).
+   * Devolve ids na ordem, quantos há no total e o resumo do perfil (para a página reordenar as faixas).
+   */
+  async recommend(visitorId: string | undefined, opts: { limit?: number; page?: number; all?: boolean } = {}) {
+    const { limit = 12, page = 1, all = false } = opts;
     const listed = await this.stores.listedStores();
-    if (!listed.length) return { ids: [], personal: false };
+    if (!listed.length) return { ids: [] as string[], total: 0, personal: false, profile: null };
+    const segOf = new Map(listed.map((s) => [s.enterpriseId, s.segment || null]));
     const [cands, pop] = await Promise.all([this.products.recommendationCandidates(listed.map((s) => s.enterpriseId)), this.popularity()]);
-    const list = cands.map((c) => ({ id: String(c._id), enterpriseId: String(c.enterpriseId), categoryId: c.categoryId ? String(c.categoryId) : null, popularity: pop.get(String(c._id)) ?? 0 }));
-    const history = visitorId && VISITOR_RE.test(visitorId)
-      ? (await this.events.find({ visitorId }).sort({ at: -1 }).limit(200).lean()).map((e): Interaction => ({ productId: String(e.productId), enterpriseId: String(e.enterpriseId), categoryId: e.categoryId ? String(e.categoryId) : null, kind: e.kind, at: e.at }))
-      : [];
-    if (history.length) return { ids: rankCandidates(list, interestProfile(history), limit), personal: true };
-    const trending = [...list].sort((a, b) => b.popularity - a.popularity);
-    return { ids: rankCandidates(trending, interestProfile([]), limit), personal: false };
+    type Row = Awaited<ReturnType<ProductService['recommendationCandidates']>>[number];
+    const priceOf = (c: Row) => Math.round(onlineEffectivePrice(c as Parameters<typeof onlineEffectivePrice>[0]) * 100);
+    const list: Candidate[] = cands.map((c) => ({
+      id: String(c._id), enterpriseId: String(c.enterpriseId), categoryId: c.categoryId ? String(c.categoryId) : null,
+      // Popularidade = interesse recente no marketplace + vendas de verdade (todas as vendas da loja contam).
+      popularity: (pop.get(String(c._id)) ?? 0) + Math.log1p((c as { soldCount?: number }).soldCount ?? 0) * 2,
+      createdAt: (c as { createdAt?: Date }).createdAt ?? null, segment: segOf.get(String(c.enterpriseId)) ?? null, priceCents: priceOf(c), name: c.name,
+    }));
+    const events = visitorId && VISITOR_RE.test(visitorId) ? await this.events.find({ visitorId }).sort({ at: -1 }).limit(300).lean() : [];
+    const info = new Map((await this.products.recommendationSignals([...new Set(events.map((e) => String(e.productId)))])).map((p) => [String(p._id), p]));
+    const history: Interaction[] = events.map((e) => {
+      const p = info.get(String(e.productId));
+      return { productId: String(e.productId), enterpriseId: String(e.enterpriseId), categoryId: e.categoryId ? String(e.categoryId) : null, kind: e.kind as EventKind, at: e.at, segment: segOf.get(String(e.enterpriseId)) ?? null, priceCents: p ? priceOf(p) : null, name: p?.name ?? null };
+    });
+    const profile = interestProfile(history);
+    const personal = profile.strength > 0;
+    const collab = personal ? await this.collab(visitorId!, profile.seen) : undefined;
+    const ranked = rankCandidates(list, profile, { collab, excludeSeen: !all, limit: all ? list.length : limit * page, minShare: all ? 0 : 0.5 });
+    const slugOf = new Map(listed.map((s) => [s.enterpriseId, s.slug]));
+    const sum = personal ? profileSummary(profile) : null;
+    // A página só conhece as lojas pelo endereço (slug), não pelo id da empresa.
+    const summary = sum ? { ...sum, stores: sum.stores.map((id) => slugOf.get(id)).filter((x): x is string => !!x) } : null;
+    return { ids: ranked.slice((page - 1) * limit, page * limit), total: ranked.length, personal, profile: summary };
   }
 }

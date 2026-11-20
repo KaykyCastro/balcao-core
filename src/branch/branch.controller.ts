@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
 import { Type } from 'class-transformer';
@@ -12,6 +12,9 @@ import { BranchService } from './branch.service';
 class CreateBranchDto {
   @IsString() @MaxLength(60) name: string;
   @IsOptional() @IsString() @MaxLength(20) cnpj?: string;
+}
+class DeleteBranchDto {
+  @IsString() @MaxLength(72) password: string;
 }
 class RenameBranchDto {
   @IsString() @MaxLength(60) name: string;
@@ -44,6 +47,20 @@ export class BranchController {
 
   @Patch(':id')
   rename(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: RenameBranchDto) { return this.svc.rename(eid, id, dto.name); }
+
+  /**
+   * Exclui uma filial (senha do dono). Se você estava dentro dela, a sessão volta para a matriz na mesma resposta.
+   */
+  @Throttle({ default: { limit: 5, ttl: 600_000 } })
+  @Delete(':id') @HttpCode(200)
+  async remove(@CurrentEnterprise() eid: string, @Param('id', ParseMongoIdPipe) id: string, @Body() dto: DeleteBranchDto, @Res({ passthrough: true }) res: Response) {
+    const r = await this.svc.remove(eid, id, dto.password);
+    if (eid === id) {
+      const s = await this.svc.switchTo(r.rootId, r.rootId);
+      setSessionCookie(res, this.config, s.accessToken, s.expiresAt);
+    }
+    return { removed: { id: r.id, name: r.name }, wasCurrent: eid === id };
+  }
 
   /** Entra em outra loja do grupo (sessão do site). */
   @Post(':id/switch') @HttpCode(200)
